@@ -4,6 +4,9 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
@@ -30,6 +33,42 @@ from PySide6.QtWidgets import (
 from ..config import Settings
 from ..core.extractor import DocumentChunk
 from ..ai.rag import RagEngine, format_chat_export
+
+
+def open_file_at_location(file_path: str | Path, line: int = 1, page: int = 1) -> bool:
+    """
+    Opens a file jumping directly to the specified line number in the user's editor
+    (e.g., VS Code 'code --goto <path>:<line>', Cursor, Sublime),
+    or falls back to system default opener (QDesktopServices).
+    """
+    p = Path(file_path).resolve()
+    if not p.exists():
+        return False
+
+    ext = p.suffix.lower()
+
+    if ext != ".pdf":
+        code_bin = shutil.which("code") or shutil.which("cursor")
+        if code_bin:
+            try:
+                subprocess.Popen([code_bin, "--goto", f"{str(p)}:{line}"], shell=sys.platform == "win32")
+                return True
+            except Exception:
+                pass
+
+        subl_bin = shutil.which("subl")
+        if subl_bin:
+            try:
+                subprocess.Popen([subl_bin, f"{str(p)}:{line}"], shell=sys.platform == "win32")
+                return True
+            except Exception:
+                pass
+
+    try:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        return True
+    except Exception:
+        return False
 
 
 class SourceViewerDialog(QDialog):
@@ -65,7 +104,8 @@ class SourceViewerDialog(QDialog):
         )
         for i, c in enumerate(self.chunks):
             sec_tag = f" § {c.section}" if getattr(c, "section", "") else ""
-            item = QListWidgetItem(f"📄 [{i + 1}] {c.file_name}{sec_tag} (Page {c.page})")
+            line_tag = f" [L{c.start_line}]" if getattr(c, "start_line", 1) > 1 else ""
+            item = QListWidgetItem(f"📄 [{i + 1}] {c.file_name}{sec_tag}{line_tag} (Page {c.page})")
             self.chunk_list.addItem(item)
         self.chunk_list.currentRowChanged.connect(self._on_chunk_selected)
         splitter.addWidget(self.chunk_list)
@@ -97,8 +137,8 @@ class SourceViewerDialog(QDialog):
         copy_btn = QPushButton("📋 Copy Snippet")
         copy_btn.clicked.connect(self._copy_snippet)
 
-        open_file_btn = QPushButton("📄 Open File")
-        open_file_btn.clicked.connect(self._open_file)
+        self.open_file_btn = QPushButton("📄 Open File")
+        self.open_file_btn.clicked.connect(self._open_file)
 
         open_folder_btn = QPushButton("📁 Open Folder")
         open_folder_btn.clicked.connect(self._open_folder)
@@ -107,7 +147,7 @@ class SourceViewerDialog(QDialog):
         close_btn.clicked.connect(self.accept)
 
         btn_row.addWidget(copy_btn)
-        btn_row.addWidget(open_file_btn)
+        btn_row.addWidget(self.open_file_btn)
         btn_row.addWidget(open_folder_btn)
         btn_row.addStretch()
         btn_row.addWidget(close_btn)
@@ -126,11 +166,18 @@ class SourceViewerDialog(QDialog):
         if 0 <= row < len(self.chunks):
             c = self.chunks[row]
             sec_info = f" &nbsp;|&nbsp; <b>Section:</b> <code>{c.section}</code>" if getattr(c, "section", "") else ""
+            line_info = f" &nbsp;|&nbsp; <b>Line:</b> {c.start_line}–{c.end_line}" if getattr(c, "start_line", 1) > 1 else ""
             self.meta_label.setText(
-                f"<b>File:</b> {c.file_name} &nbsp;|&nbsp; <b>Page:</b> {c.page}{sec_info} &nbsp;|&nbsp; "
+                f"<b>File:</b> {c.file_name} &nbsp;|&nbsp; <b>Page:</b> {c.page}{sec_info}{line_info} &nbsp;|&nbsp; "
                 f"<b>Length:</b> {c.char_count} chars ({c.word_count} words)<br>"
                 f"<b>Path:</b> <code>{c.doc_path}</code>"
             )
+            if getattr(c, "start_line", 1) > 1:
+                self.open_file_btn.setText(f"📄 Open at Line {c.start_line}")
+                self.open_file_btn.setToolTip(f"Open directly in code editor at line {c.start_line}")
+            else:
+                self.open_file_btn.setText("📄 Open File")
+                self.open_file_btn.setToolTip("Open file in external viewer")
             self._render_snippet_text(c.text)
 
     def _render_snippet_text(self, text: str):
@@ -161,9 +208,10 @@ class SourceViewerDialog(QDialog):
     def _open_file(self):
         row = self.chunk_list.currentRow()
         if 0 <= row < len(self.chunks):
-            p = Path(self.chunks[row].doc_path)
+            c = self.chunks[row]
+            p = Path(c.doc_path)
             if p.exists():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+                open_file_at_location(p, line=getattr(c, "start_line", 1), page=getattr(c, "page", 1))
             else:
                 QMessageBox.warning(self, "File Not Found", f"Cannot open missing file:\n{p}")
 
@@ -214,6 +262,7 @@ class StreamQueryWorker(QThread):
         top_k: int = 3,
         score_threshold: float = 0.0,
         use_hyde: bool = False,
+        use_reranker: bool = False,
     ):
         super().__init__()
         self.engine = engine
@@ -223,6 +272,7 @@ class StreamQueryWorker(QThread):
         self.top_k = top_k
         self.score_threshold = score_threshold
         self.use_hyde = use_hyde
+        self.use_reranker = use_reranker
         self.is_stopped = False
 
     def stop(self):
@@ -239,6 +289,7 @@ class StreamQueryWorker(QThread):
                 score_threshold=self.score_threshold,
                 compress_history_enabled=True,
                 use_hyde=self.use_hyde,
+                use_reranker=self.use_reranker,
             )
             cited = []
             try:
@@ -358,6 +409,12 @@ class ChatTab(QWidget):
         self.hyde_check.setStyleSheet("font-size: 12px; color: #334155; font-weight: bold; margin-left: 8px;")
         self.hyde_check.setToolTip("Hypothetical Document Embeddings: Expands semantic queries for higher factual recall.")
         filter_row.addWidget(self.hyde_check)
+
+        self.rerank_check = QCheckBox("Re-rank")
+        self.rerank_check.setChecked(False)
+        self.rerank_check.setStyleSheet("font-size: 12px; color: #334155; font-weight: bold; margin-left: 8px;")
+        self.rerank_check.setToolTip("Cross-Encoder Re-ranker: Re-ranks top candidates using cross-scoring for higher precision.")
+        filter_row.addWidget(self.rerank_check)
 
         filter_row.addStretch()
 
@@ -562,6 +619,7 @@ class ChatTab(QWidget):
         top_k = self.top_k_spin.value()
         score_threshold = self._get_selected_threshold()
         use_hyde = self.hyde_check.isChecked()
+        use_reranker = self.rerank_check.isChecked()
 
         self.query_worker = StreamQueryWorker(
             self.engine,
@@ -571,6 +629,7 @@ class ChatTab(QWidget):
             top_k=top_k,
             score_threshold=score_threshold,
             use_hyde=use_hyde,
+            use_reranker=use_reranker,
         )
         self.query_worker.token.connect(self._on_token)
         self.query_worker.done.connect(self._on_stream_done)

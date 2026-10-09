@@ -131,6 +131,138 @@ def compress_history(
     return compressed
 
 
+def cross_encoder_score(query: str, chunk: DocumentChunk, base_score: float = 0.0) -> float:
+    """
+    Computes a fast multi-signal cross-feature score between query and chunk:
+    - Exact query phrase containment (+3.0)
+    - Keyword overlap & coverage ratio (+2.5 * ratio)
+    - Section breadcrumb & filename token match (+1.5)
+    - Window proximity of query terms (+1.0)
+    - Base retrieval score prior (+1.0 * normalized_base)
+    """
+    if not query or not getattr(chunk, "text", ""):
+        return 0.0
+
+    q_lower = query.lower().strip()
+    text_lower = chunk.text.lower()
+
+    score = 0.0
+
+    # 1. Exact phrase match
+    if len(q_lower) > 3 and q_lower in text_lower:
+        score += 3.0
+
+    # 2. Token overlap & coverage
+    q_words = [w for w in re.findall(r"\w+", q_lower) if w not in STOPWORDS and len(w) >= 2]
+    if q_words:
+        text_words = set(re.findall(r"\w+", text_lower))
+        matches = [w for w in q_words if w in text_words]
+        coverage = len(matches) / len(q_words)
+        score += 2.5 * coverage
+
+        # 3. Section and file match
+        sec_lower = getattr(chunk, "section", "").lower()
+        file_lower = getattr(chunk, "file_name", "").lower()
+        sec_matches = [w for w in q_words if w in sec_lower or w in file_lower]
+        if sec_matches:
+            score += 1.5 * (len(sec_matches) / len(q_words))
+
+        # 4. Proximity density: if >= 2 words match, check distance between first and last match
+        if len(matches) >= 2:
+            indices = [text_lower.find(w) for w in matches if text_lower.find(w) != -1]
+            if indices and (max(indices) - min(indices) <= 250):
+                score += 1.0
+
+    # 5. Base score prior
+    norm_base = min(1.0, max(0.0, float(base_score)))
+    score += norm_base * 1.0
+
+    return score
+
+
+def llm_rerank_candidates(
+    settings: Settings,
+    query: str,
+    candidates: list[tuple[DocumentChunk, float]],
+    top_n: int = 10,
+) -> dict[int, float]:
+    """
+    Prompts the local LLM to score the relevance of top candidates from 0 to 10.
+    Returns a dict mapping candidate index (0-based) to normalized score (0.0 - 1.0).
+    Falls back gracefully if LLM is unavailable or fails to return JSON.
+    """
+    if not candidates or not query.strip():
+        return {}
+
+    eval_candidates = candidates[:top_n]
+    prompt_lines = [
+        "Rate the relevance of each candidate text to the search query from 0 to 10.",
+        f'Query: "{query}"',
+        "",
+        "Candidates:",
+    ]
+    for i, (chunk, _) in enumerate(eval_candidates, 1):
+        clean_text = chunk.preview(max_chars=200).replace("\n", " ")
+        prompt_lines.append(f"[{i}] {clean_text}")
+
+    prompt_lines.append("")
+    prompt_lines.append('Return STRICTLY a JSON list of objects with "id" and "score", e.g. [{"id": 1, "score": 9.0}, {"id": 2, "score": 2.5}]')
+    prompt = "\n".join(prompt_lines)
+
+    try:
+        raw_resp = chat(
+            settings,
+            [{"role": "user", "content": prompt}],
+            options={"temperature": 0.0, "num_predict": 120, "num_ctx": 2048},
+        )
+        cleaned_json = re.sub(r"^```(?:json)?|```$", "", raw_resp.strip(), flags=re.MULTILINE).strip()
+        data = json.loads(cleaned_json)
+        scores: dict[int, float] = {}
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and "id" in item and "score" in item:
+                    cand_idx = int(item["id"]) - 1
+                    if 0 <= cand_idx < len(eval_candidates):
+                        raw_score = float(item["score"])
+                        scores[cand_idx] = max(0.0, min(1.0, raw_score / 10.0))
+        return scores
+    except Exception:
+        return {}
+
+
+def rerank_chunks(
+    query: str,
+    candidates: list[tuple[DocumentChunk, float]],
+    top_k: int = 3,
+    settings: Settings | None = None,
+    use_llm: bool = False,
+    rerank_pool_size: int = 10,
+) -> list[tuple[DocumentChunk, float]]:
+    """
+    Re-ranks top candidate chunks using fast cross-scoring and optional local LLM evaluation.
+    Sorts by final relevance score descending and returns the top_k entries.
+    """
+    if not candidates:
+        return []
+
+    pool = candidates[:rerank_pool_size]
+    llm_scores: dict[int, float] = {}
+    if use_llm and settings is not None:
+        llm_scores = llm_rerank_candidates(settings, query, pool, top_n=rerank_pool_size)
+
+    reranked: list[tuple[DocumentChunk, float]] = []
+    for i, (chunk, base_score) in enumerate(pool):
+        cross_score = cross_encoder_score(query, chunk, base_score=base_score)
+        if i in llm_scores:
+            final_score = (cross_score * 0.6) + (llm_scores[i] * 5.0 * 0.4)
+        else:
+            final_score = cross_score
+        reranked.append((chunk, final_score))
+
+    reranked.sort(key=lambda x: x[1], reverse=True)
+    return reranked[:top_k]
+
+
 class BM25Index:
     """
     In-memory Okapi BM25 lexical index with inverted postings, document length
@@ -563,11 +695,14 @@ class RagEngine:
         hybrid: bool = True,
         score_threshold: float = 0.0,
         use_hyde: bool = False,
+        use_reranker: bool = False,
+        use_llm_reranker: bool = False,
+        rerank_pool_size: int = 10,
     ) -> list[tuple[DocumentChunk, float]]:
         """
         Retrieves top relevant chunks using Hybrid Search (Okapi BM25 + FAISS Vector)
         combined with Reciprocal Rank Fusion (RRF), optional file-type filtering,
-        score thresholding, and optional HyDE query expansion.
+        score thresholding, optional HyDE query expansion, and optional Cross-Encoder/LLM Re-ranking.
         """
         if not self.chunks or not query.strip():
             return []
@@ -635,7 +770,25 @@ class RagEngine:
         elif bm25_ranked:
             scored_candidates = [(idx, 1.0 / (rank + 1)) for rank, idx in enumerate(bm25_ranked)]
 
-        # 6. Apply score thresholding
+        # 6. Optional Cross-Encoder / LLM Re-ranker
+        if use_reranker:
+            candidate_chunks = [(self.chunks[idx], score) for idx, score in scored_candidates]
+            reranked = rerank_chunks(
+                query,
+                candidate_chunks,
+                top_k=top_k,
+                settings=self.settings,
+                use_llm=use_llm_reranker,
+                rerank_pool_size=rerank_pool_size,
+            )
+            filtered = [
+                (chunk, score)
+                for chunk, score in reranked
+                if score >= score_threshold
+            ]
+            return filtered[:top_k]
+
+        # 7. Standard score thresholding without re-ranking
         filtered = [
             (self.chunks[idx], score)
             for idx, score in scored_candidates
@@ -654,10 +807,12 @@ class RagEngine:
         score_threshold: float = 0.0,
         compress_history_enabled: bool = True,
         use_hyde: bool = False,
+        use_reranker: bool = False,
+        use_llm_reranker: bool = False,
     ) -> Generator[str, None, list[DocumentChunk]]:
         """
         Streams answers token-by-token with grounded citations, context compression,
-        and optional HyDE expansion. Returns the list of cited chunks at completion.
+        optional HyDE expansion, and optional Re-ranking. Returns the list of cited chunks at completion.
         """
         matched = self.search(
             question,
@@ -666,6 +821,8 @@ class RagEngine:
             hybrid=hybrid,
             score_threshold=score_threshold,
             use_hyde=use_hyde,
+            use_reranker=use_reranker,
+            use_llm_reranker=use_llm_reranker,
         )
         retrieved_chunks = [chunk for chunk, _score in matched]
 
@@ -685,8 +842,9 @@ class RagEngine:
         context_parts = []
         for i, c in enumerate(retrieved_chunks, 1):
             sec_label = f" | Section: {c.section}" if getattr(c, "section", "") else ""
+            line_label = f" | Line: {c.start_line}" if getattr(c, "start_line", 1) > 1 else ""
             context_parts.append(
-                f"[Source {i}: {c.file_name}{sec_label} (Page {c.page})]\nPath: {c.doc_path}\n{c.text}"
+                f"[Source {i}: {c.file_name}{sec_label}{line_label} (Page {c.page})]\nPath: {c.doc_path}\n{c.text}"
             )
         context_str = "\n\n".join(context_parts)
 
@@ -722,6 +880,8 @@ class RagEngine:
         score_threshold: float = 0.0,
         compress_history_enabled: bool = True,
         use_hyde: bool = False,
+        use_reranker: bool = False,
+        use_llm_reranker: bool = False,
     ) -> tuple[str, list[DocumentChunk]]:
         gen = self.chat_with_docs_stream(
             question,
@@ -732,6 +892,8 @@ class RagEngine:
             score_threshold=score_threshold,
             compress_history_enabled=compress_history_enabled,
             use_hyde=use_hyde,
+            use_reranker=use_reranker,
+            use_llm_reranker=use_llm_reranker,
         )
         tokens = []
         try:

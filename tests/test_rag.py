@@ -7,6 +7,7 @@ import pytest
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication
 
+from polaris.config import Settings
 from polaris.core.extractor import (
     DocumentChunk,
     chunk_text,
@@ -16,6 +17,7 @@ from polaris.core.extractor import (
     chunk_file,
     read_text_safe,
     compute_file_hash,
+    find_line_range,
 )
 from polaris.ai.rag import (
     BM25Index,
@@ -24,9 +26,17 @@ from polaris.ai.rag import (
     reciprocal_rank_fusion,
     expand_query_terms,
     compress_history,
+    cross_encoder_score,
+    llm_rerank_candidates,
+    rerank_chunks,
     STOPWORDS,
 )
-from polaris.ui.chat_tab import ChatTab, SourceViewerDialog, StreamQueryWorker
+from polaris.ui.chat_tab import (
+    ChatTab,
+    SourceViewerDialog,
+    StreamQueryWorker,
+    open_file_at_location,
+)
 
 
 @pytest.fixture(scope="session")
@@ -717,6 +727,189 @@ def test_source_viewer_dialog(qapp):
 
         dialog.search_edit.setText("expenses")
         assert "expenses" in dialog.text_preview.toHtml()
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_document_chunk_line_numbers():
+    chunk = DocumentChunk(
+        doc_path="test.py",
+        page=1,
+        text="def foo():\n    return 42",
+        chunk_index=0,
+        section="foo",
+        start_line=10,
+        end_line=12,
+    )
+    assert chunk.start_line == 10
+    assert chunk.end_line == 12
+    d = chunk.to_dict()
+    assert d["start_line"] == 10
+    assert d["end_line"] == 12
+
+    restored = DocumentChunk.from_dict(d)
+    assert restored.start_line == 10
+    assert restored.end_line == 12
+
+
+def test_find_line_range():
+    full_text = "line 1\nline 2\nline 3\nline 4\nline 5\n"
+    s, e, offset = find_line_range(full_text, "line 1")
+    assert s == 1
+    assert e == 1
+
+    s, e, offset = find_line_range(full_text, "line 3\nline 4")
+    assert s == 3
+    assert e == 4
+
+
+def test_chunk_markdown_line_tracking():
+    md = "# Heading 1\nContent under heading 1.\n\n## Subheading\nSecond content block."
+    chunks = chunk_markdown(md, file_path="doc.md", chunk_chars=300)
+    assert len(chunks) >= 2
+    assert chunks[0].start_line >= 1
+    assert chunks[1].start_line >= 3
+
+
+def test_chunk_code_line_tracking():
+    code = (
+        "def first_func():\n"
+        "    return 1\n\n"
+        "def second_func():\n"
+        "    return 2\n"
+    )
+    chunks = chunk_code(code, file_path="app.py", extension=".py", chunk_chars=300)
+    assert len(chunks) == 2
+    assert chunks[0].start_line == 1
+    assert chunks[1].start_line >= 4
+
+
+def test_open_file_at_location_editor(tmp_path):
+    f = tmp_path / "hello.py"
+    f.write_text("print('hello')", encoding="utf-8")
+
+    with patch("shutil.which", return_value="code"), patch("subprocess.Popen") as mock_popen:
+        res = open_file_at_location(f, line=42)
+        assert res is True
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
+        assert args[0] == "code"
+        assert args[1] == "--goto"
+        assert f"{str(f)}:42" in args[2]
+
+
+def test_open_file_at_location_fallback(tmp_path):
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 dummy")
+
+    with patch("shutil.which", return_value=None), patch("PySide6.QtGui.QDesktopServices.openUrl") as mock_open:
+        res = open_file_at_location(f, page=2)
+        assert res is True
+        mock_open.assert_called_once()
+
+
+def test_cross_encoder_score():
+    chunk = DocumentChunk(
+        doc_path="c:/docs/faiss_guide.md",
+        page=1,
+        text="FAISS provides fast vector indexing and cosine similarity search.",
+        chunk_index=0,
+        section="Vector Database",
+    )
+
+    # 1. Exact phrase match
+    score_exact = cross_encoder_score("vector indexing", chunk, base_score=0.5)
+    assert score_exact > 3.0
+
+    # 2. Section match
+    score_sec = cross_encoder_score("Database", chunk, base_score=0.1)
+    assert score_sec > 1.0
+
+    # 3. Unrelated query
+    score_unrelated = cross_encoder_score("banana apple strawberry", chunk, base_score=0.0)
+    assert score_unrelated == 0.0
+
+
+def test_llm_rerank_candidates():
+    settings = Settings()
+    chunks = [
+        (DocumentChunk("doc1.txt", 1, "FAISS vector search indexing", 0), 0.5),
+        (DocumentChunk("doc2.txt", 1, "Recipe for chocolate chip cookies", 1), 0.4),
+    ]
+
+    mock_json_resp = '[{"id": 1, "score": 9.5}, {"id": 2, "score": 1.0}]'
+    with patch("polaris.ai.rag.chat", return_value=mock_json_resp):
+        scores = llm_rerank_candidates(settings, "FAISS search", chunks)
+        assert len(scores) == 2
+        assert scores[0] == 0.95
+        assert scores[1] == 0.10
+
+    # Error handling fallback
+    with patch("polaris.ai.rag.chat", side_effect=RuntimeError("Ollama offline")):
+        err_scores = llm_rerank_candidates(settings, "query", chunks)
+        assert err_scores == {}
+
+
+def test_rerank_chunks_ordering():
+    c1 = DocumentChunk("doc1.txt", 1, "General computing notes.", 0)
+    c2 = DocumentChunk("doc2.txt", 1, "High performance FAISS vector indexing with GPU acceleration.", 1)
+    candidates = [(c1, 0.8), (c2, 0.4)]
+
+    reranked = rerank_chunks("FAISS vector indexing", candidates, top_k=2)
+    assert len(reranked) == 2
+    assert reranked[0][0] == c2  # c2 promoted to top rank
+    assert reranked[1][0] == c1
+
+
+def test_search_with_reranker():
+    engine = RagEngine()
+    c1 = DocumentChunk("notes.txt", 1, "General project notes.", 0)
+    c2 = DocumentChunk("faiss.txt", 1, "FAISS vector index flat IP search.", 1)
+    engine.chunks = [c1, c2]
+
+    with patch.object(engine.bm25, "search", return_value=[(0, 1.0), (1, 1.0)]):
+        results = engine.search("FAISS vector", top_k=2, hybrid=True, use_reranker=True)
+        assert len(results) == 2
+        assert results[0][0] == c2
+
+
+def test_chat_tab_rerank_ui(qapp):
+    tab = ChatTab()
+    try:
+        assert tab.rerank_check is not None
+        assert tab.rerank_check.text() == "Re-rank"
+        assert tab.rerank_check.isChecked() is False
+
+        tab.rerank_check.setChecked(True)
+        assert tab.rerank_check.isChecked() is True
+    finally:
+        tab.deleteLater()
+        qapp.processEvents()
+
+
+def test_source_viewer_deep_linking(qapp):
+    chunk = DocumentChunk(
+        doc_path="c:/sample/test.py",
+        page=1,
+        text="def compute():\n    return 100",
+        chunk_index=0,
+        section="compute",
+        start_line=25,
+        end_line=26,
+    )
+    dialog = SourceViewerDialog([chunk], initial_index=0)
+    try:
+        assert "Line:" in dialog.meta_label.text() and "25" in dialog.meta_label.text()
+        assert "Open at Line 25" in dialog.open_file_btn.text()
+        assert "[L25]" in dialog.chunk_list.item(0).text()
+
+        with patch("polaris.ui.chat_tab.open_file_at_location") as mock_open:
+            with patch("pathlib.Path.exists", return_value=True):
+                dialog._open_file()
+                mock_open.assert_called_once()
+                args, kwargs = mock_open.call_args
+                assert kwargs.get("line") == 25 or (len(args) > 1 and args[1] == 25)
     finally:
         dialog.deleteLater()
         qapp.processEvents()

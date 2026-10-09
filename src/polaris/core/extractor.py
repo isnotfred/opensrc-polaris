@@ -15,6 +15,8 @@ class DocumentChunk:
     text: str
     chunk_index: int
     section: str = ""
+    start_line: int = 1
+    end_line: int = 1
 
     @property
     def file_name(self) -> str:
@@ -47,6 +49,8 @@ class DocumentChunk:
             "text": self.text,
             "chunk_index": self.chunk_index,
             "section": self.section,
+            "start_line": self.start_line,
+            "end_line": self.end_line,
         }
 
     @classmethod
@@ -57,7 +61,39 @@ class DocumentChunk:
             text=data["text"],
             chunk_index=data["chunk_index"],
             section=data.get("section", ""),
+            start_line=data.get("start_line", 1),
+            end_line=data.get("end_line", 1),
         )
+
+
+def find_line_range(full_text: str, piece: str, search_start: int = 0) -> tuple[int, int, int]:
+    """
+    Finds the 1-based start and end line numbers of piece in full_text.
+    Returns (start_line, end_line, found_offset).
+    """
+    if not full_text or not piece:
+        return 1, 1, search_start
+
+    # Clean possible prefix tags like [Section: ...] or [Symbol: ...]
+    clean_piece = re.sub(r"^\[(?:Section|Symbol):[^\]]+\]\s*", "", piece).strip()
+    target = clean_piece[:120] if len(clean_piece) > 120 else clean_piece
+
+    idx = full_text.find(target, search_start) if target else -1
+    if idx == -1 and target:
+        first_line = clean_piece.splitlines()[0].strip() if clean_piece.splitlines() else ""
+        if first_line:
+            idx = full_text.find(first_line, search_start)
+            if idx == -1:
+                idx = full_text.find(first_line)
+
+    if idx == -1:
+        start_line = full_text[:search_start].count("\n") + 1
+        end_line = start_line + max(0, piece.count("\n"))
+        return start_line, end_line, search_start
+
+    start_line = full_text[:idx].count("\n") + 1
+    end_line = start_line + max(0, clean_piece.count("\n"))
+    return start_line, end_line, idx + len(target)
 
 
 def compute_file_hash(file_path: Path | str, chunk_size: int = 65536) -> str:
@@ -196,6 +232,7 @@ def chunk_markdown(
 
     chunks: list[DocumentChunk] = []
     idx = 0
+    search_offset = 0
 
     for breadcrumb, sec_content in sections:
         header_prefix = f"[Section: {breadcrumb}]\n" if breadcrumb else ""
@@ -204,12 +241,15 @@ def chunk_markdown(
         sub_chunks = chunk_text(sec_content, chunk_chars=avail_chars, overlap=overlap)
         for piece in sub_chunks:
             full_text = f"{header_prefix}{piece}" if header_prefix else piece
+            s_line, e_line, search_offset = find_line_range(text, piece, search_start=search_offset)
             chunks.append(DocumentChunk(
                 doc_path=file_path,
                 page=1,
                 text=full_text,
                 chunk_index=idx,
                 section=breadcrumb,
+                start_line=s_line,
+                end_line=e_line,
             ))
             idx += 1
 
@@ -275,6 +315,7 @@ def chunk_code(
 
     chunks: list[DocumentChunk] = []
     idx = 0
+    search_offset = 0
 
     for symbol, block_content in blocks:
         prefix = f"[Symbol: {symbol}]\n" if symbol else ""
@@ -283,12 +324,15 @@ def chunk_code(
         sub_chunks = chunk_text(block_content, chunk_chars=avail_chars, overlap=overlap)
         for piece in sub_chunks:
             full_text = f"{prefix}{piece}" if prefix else piece
+            s_line, e_line, search_offset = find_line_range(text, piece, search_start=search_offset)
             chunks.append(DocumentChunk(
                 doc_path=file_path,
                 page=1,
                 text=full_text,
                 chunk_index=idx,
                 section=symbol,
+                start_line=s_line,
+                end_line=e_line,
             ))
             idx += 1
 
@@ -434,13 +478,17 @@ def chunk_file(file_path: Path | str, chunk_chars: int = 1200, overlap: int = 15
     idx = 0
     for page_num, text in pages:
         page_chunks = chunk_text(text, chunk_chars=overlap, overlap=overlap) if chunk_chars <= overlap else chunk_text(text, chunk_chars, overlap)
+        search_offset = 0
         for piece in page_chunks:
+            s_line, e_line, search_offset = find_line_range(text, piece, search_start=search_offset)
             chunks.append(DocumentChunk(
                 doc_path=str(file_path),
                 page=page_num,
                 text=piece,
                 chunk_index=idx,
                 section="",
+                start_line=s_line,
+                end_line=e_line,
             ))
             idx += 1
     return chunks
