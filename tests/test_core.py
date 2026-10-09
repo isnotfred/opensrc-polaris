@@ -64,3 +64,23 @@ def test_planner_rejects_bad_plans(tmp_path):
         validate_plan({"action": "find_duplicates", "source_directory": "/etc"}, roots)
     with pytest.raises(PlanError):
         validate_plan("not json at all", roots)
+
+
+def test_plan_by_type_and_size(tmp_path):
+    from polaris.core.organizer import plan_by_type_and_size
+    src = tmp_path / "files"
+    src.mkdir()
+    doc = src / "doc.docx"
+    doc.write_text("small document")
+    img = src / "pic.png"
+    img.write_bytes(b"x" * (1024 * 1024 * 2))  # 2MB medium file
+
+    out = tmp_path / "organized"
+    moves = plan_by_type_and_size([str(doc), str(img)], str(out))
+    assert len(moves) == 2
+
+    # docx should go to Documents/Small (under 1MB)
+    assert any("Documents" in m.dst and "Small (under 1MB)" in m.dst and "doc.docx" in m.dst for m in moves)
+    # png should go to Images/Medium (1MB-50MB)
+    assert any("Images" in m.dst and "Medium (1MB-50MB)" in m.dst and "pic.png" in m.dst for m in moves)
+

@@ -17,6 +17,7 @@ class RagEngine:
         self.chunks: list[DocumentChunk] = []
         self.index: faiss.IndexFlatIP | None = None
         self.indexed_folder: str = ""
+        self.indexed_files: list[str] = []
 
     def index_folder(
         self,
@@ -37,6 +38,8 @@ class RagEngine:
             f for f in folder.rglob("*")
             if f.is_file() and f.suffix.lower() in supported_exts and not f.name.startswith(".")
         ]
+
+        self.indexed_files = [f.name for f in target_files]
 
         if not target_files:
             self.chunks = []
@@ -101,42 +104,76 @@ class RagEngine:
         question: str,
         history: list[dict] | None = None,
         top_k: int = 3,
+        min_score: float = 0.22,
     ) -> Generator[str, None, list[DocumentChunk]]:
         """
         Streams answers token-by-token.
         Returns the list of cited chunks at completion.
         """
         matched = self.search(question, top_k=top_k)
-        retrieved_chunks = [chunk for chunk, _score in matched]
+        # Filter chunks by relevance score floor to eliminate hallucination from irrelevant files
+        relevant_matches = [(chunk, score) for chunk, score in matched if score >= min_score]
+        retrieved_chunks = [chunk for chunk, _ in relevant_matches]
+
+        manifest_clause = ""
+        if self.indexed_files:
+            file_names_list = ", ".join(f"`{name}`" for name in self.indexed_files)
+            manifest_clause = (
+                f"\nFOLDER FILE MANIFEST:\n"
+                f"The indexed folder contains exactly {len(self.indexed_files)} physical file(s): {file_names_list}.\n"
+                f"URLs, links, or online profiles (e.g. LinkedIn, GitHub) mentioned inside a document's text are NOT files in the folder.\n"
+            )
 
         if not retrieved_chunks:
+            fallback_info = (
+                f"The folder currently contains {len(self.indexed_files)} file(s): {', '.join(self.indexed_files)}."
+                if self.indexed_files
+                else "No relevant files or chunks were found in the folder."
+            )
             messages = [
-                {"role": "system", "content": "You are a helpful desktop assistant. Keep answers concise."},
-                {"role": "user", "content": question}
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Polaris AI, an intelligent desktop assistant. "
+                        f"{fallback_info} "
+                        "Answer the question directly and concisely."
+                    ),
+                },
+                {"role": "user", "content": question},
             ]
-            for token in chat_stream(self.settings, messages, options={"num_predict": 250, "num_ctx": 2048}):
+            for token in chat_stream(
+                self.settings,
+                messages,
+                options={"num_predict": 450, "num_ctx": 2048, "temperature": 0.2},
+            ):
                 yield token
             return []
 
-        # Keep context concise so the CPU can ingest it in < 1 second
+        # Build clean citation context
         context_str = "\n\n".join([
             f"[Source: {Path(c.doc_path).name} (Page {c.page})]\n{c.text}"
             for c in retrieved_chunks
         ])
 
         system_prompt = (
-            "You are Polaris AI. Answer the question accurately using ONLY the context below.\n"
-            "Cite sources like [filename, Page X]. If the answer isn't in the context, say so.\n"
-            "Keep the answer concise and direct.\n\n"
-            f"CONTEXT:\n{context_str}"
+            "You are Polaris AI, an intelligent desktop assistant.\n"
+            f"{manifest_clause}\n"
+            "Answer the question accurately using the context below.\n"
+            "Cite sources explicitly like [filename, Page X]. If the answer cannot be determined from the context, state that clearly.\n"
+            "Keep the answer direct, well-structured, and complete without cutting off.\n\n"
+            f"DOCUMENT CONTEXT:\n{context_str}"
         )
 
         messages = [{"role": "system", "content": system_prompt}]
         if history:
-            messages.extend(history[-2:])  # keep last 2 turns
+            messages.extend(history[-2:])  # keep last 2 turns for context continuity
         messages.append({"role": "user", "content": question})
 
-        for token in chat_stream(self.settings, messages, options={"num_predict": 300, "num_ctx": 2048}):
+        for token in chat_stream(
+            self.settings,
+            messages,
+            options={"num_predict": 650, "num_ctx": 3584, "temperature": 0.1},
+        ):
             yield token
 
         return retrieved_chunks
@@ -149,9 +186,11 @@ class RagEngine:
     ) -> tuple[str, list[DocumentChunk]]:
         gen = self.chat_with_docs_stream(question, history, top_k)
         tokens = []
+        cited: list[DocumentChunk] = []
         try:
             while True:
                 tokens.append(next(gen))
         except StopIteration as e:
             cited = e.value or []
         return "".join(tokens), cited
+

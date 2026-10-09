@@ -56,6 +56,10 @@ class StreamSummarizeWorker(QThread):
         self.preset = preset
         self.settings = settings
         self.length_level = length_level
+        self._is_stopped = False
+
+    def stop(self):
+        self._is_stopped = True
 
     def run(self):
         try:
@@ -65,10 +69,14 @@ class StreamSummarizeWorker(QThread):
                 self.settings,
                 self.length_level,
             ):
+                if self._is_stopped:
+                    return
                 self.token.emit(t)
-            self.done.emit()
+            if not self._is_stopped:
+                self.done.emit()
         except Exception as e:
-            self.failed.emit(str(e))
+            if not self._is_stopped:
+                self.failed.emit(str(e))
 
 
 class ExtractEntitiesWorker(QThread):
@@ -81,15 +89,23 @@ class ExtractEntitiesWorker(QThread):
         super().__init__()
         self.file_path = file_path
         self.settings = settings
+        self._is_stopped = False
+
+    def stop(self):
+        self._is_stopped = True
 
     def run(self):
         try:
             tokens: list[str] = []
             for t in extract_entities_stream(self.file_path, self.settings):
+                if self._is_stopped:
+                    return
                 tokens.append(t)
-            self.done.emit("".join(tokens))
+            if not self._is_stopped:
+                self.done.emit("".join(tokens))
         except Exception as e:
-            self.failed.emit(str(e))
+            if not self._is_stopped:
+                self.failed.emit(str(e))
 
 
 class ComparativeSummaryWorker(QThread):
@@ -111,6 +127,10 @@ class ComparativeSummaryWorker(QThread):
         self.preset = preset
         self.settings = settings
         self.length_level = length_level
+        self._is_stopped = False
+
+    def stop(self):
+        self._is_stopped = True
 
     def run(self):
         try:
@@ -120,10 +140,15 @@ class ComparativeSummaryWorker(QThread):
                 self.settings,
                 self.length_level,
             ):
+                if self._is_stopped:
+                    return
                 self.token.emit(t)
-            self.done.emit()
+            if not self._is_stopped:
+                self.done.emit()
         except Exception as e:
-            self.failed.emit(str(e))
+            if not self._is_stopped:
+                self.failed.emit(str(e))
+
 
 
 class SummarizeTab(QWidget):
@@ -291,6 +316,14 @@ class SummarizeTab(QWidget):
         )
         self.run_btn.clicked.connect(self._on_run_clicked)
         action_row.addWidget(self.run_btn)
+
+        self.stop_btn = QPushButton("⏹ Stop")
+        self.stop_btn.setStyleSheet(
+            "font-weight: bold; font-size: 13px; background-color: #dc2626; color: white; padding: 7px 14px; border-radius: 4px;"
+        )
+        self.stop_btn.hide()
+        self.stop_btn.clicked.connect(self._stop_current_operation)
+        action_row.addWidget(self.stop_btn)
 
         self.status_label = QLabel("Ready. Select a document and click 'Summarize with Local AI'.")
         self.status_label.setStyleSheet("color: #64748b; font-size: 12px; margin-left: 6px;")
@@ -471,8 +504,7 @@ class SummarizeTab(QWidget):
 
     def start_summary(self):
         file_path = self.file_edit.text().strip()
-        if not file_path or not Path(file_path).is_file():
-            QMessageBox.warning(self, "Invalid File", "Please select a valid document file.")
+        if not self._validate_file_path(file_path):
             return
 
         length_level = self.length_slider.value()
@@ -516,13 +548,9 @@ class SummarizeTab(QWidget):
 
     def _start_extraction(self):
         file_path = self.file_edit.text().strip()
-        if not file_path or not Path(file_path).is_file():
-            QMessageBox.warning(
-                self,
-                "No Document Selected",
-                "Please select a valid document file first.",
-            )
+        if not self._validate_file_path(file_path):
             return
+
 
         self._set_running_state(True)
         self.summary_viewer.clear()
@@ -712,16 +740,49 @@ class SummarizeTab(QWidget):
             words = len(self.accumulated_text.split())
             self.stats_label.setText(f"Comparison: {words} words ({len(self.accumulated_text)} characters)")
 
-    # ── General Slots & Helpers ─────────────────────────────────────────────
+    def _validate_file_path(self, path_str: str) -> bool:
+        if not path_str or not Path(path_str).is_file():
+            QMessageBox.warning(self, "Invalid File", "Please select a valid document file.")
+            return False
+        p = Path(path_str)
+        try:
+            sz = p.stat().st_size
+            if sz == 0:
+                QMessageBox.warning(self, "Empty File", f"'{p.name}' is completely empty (0 bytes).")
+                return False
+            if sz > 35 * 1024 * 1024:
+                resp = QMessageBox.question(
+                    self,
+                    "Large File Warning",
+                    f"'{p.name}' is {sz / (1024*1024):.1f} MB. Processing this file may take longer on CPU. Do you want to continue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if resp != QMessageBox.StandardButton.Yes:
+                    return False
+        except OSError:
+            pass
+        return True
 
     def _set_running_state(self, running: bool):
         self.run_btn.setEnabled(not running)
         self.mode_combo.setEnabled(not running)
         self.save_btn.setEnabled(False if running else bool(self.accumulated_text))
         if running:
+            self.stop_btn.show()
             self.progress_bar.show()
         else:
+            self.stop_btn.hide()
             self.progress_bar.hide()
+
+    def _stop_current_operation(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+        if self.entity_worker and self.entity_worker.isRunning():
+            self.entity_worker.stop()
+        if self.compare_worker and self.compare_worker.isRunning():
+            self.compare_worker.stop()
+        self._set_running_state(False)
+        self.status_label.setText("⏹ Operation cancelled by user.")
 
     def _on_op_failed(self, err: str):
         self._set_running_state(False)
@@ -743,25 +804,32 @@ class SummarizeTab(QWidget):
             src = self.file_edit.text().strip()
             stem = Path(src).stem if src and Path(src).is_file() else "document"
             suggested = f"{stem}_summary.md"
+            file_filter = "Markdown (*.md);;Plain Text (*.txt);;All Files (*.*)"
         elif self._current_mode == "entity":
             src = self.file_edit.text().strip()
             stem = Path(src).stem if src and Path(src).is_file() else "document"
             suggested = f"{stem}_entities.md"
+            file_filter = "Markdown (*.md);;JSON Data (*.json);;Plain Text (*.txt);;All Files (*.*)"
         else:
             suggested = "comparative_summary.md"
+            file_filter = "Markdown (*.md);;Plain Text (*.txt);;All Files (*.*)"
 
-        save_path, _ = QFileDialog.getSaveFileName(
+        save_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save Output As",
             str(Path(self._last_source_dir) / suggested) if self._last_source_dir else suggested,
-            "Markdown (*.md);;Plain Text (*.txt);;All Files (*.*)",
+            file_filter,
         )
         if not save_path:
             return
 
         try:
-            Path(save_path).write_text(self.accumulated_text, encoding="utf-8")
-            self.status_label.setText(f"✓ Saved to {Path(save_path).name}")
+            out_p = Path(save_path)
+            if out_p.suffix.lower() == ".json" and self._last_json_text:
+                out_p.write_text(self._last_json_text, encoding="utf-8")
+            else:
+                out_p.write_text(self.accumulated_text, encoding="utf-8")
+            self.status_label.setText(f"✓ Saved to {out_p.name}")
         except OSError as exc:
             QMessageBox.critical(self, "Save Failed", f"Could not write file:\n{exc}")
 
@@ -772,3 +840,4 @@ class SummarizeTab(QWidget):
         self.save_btn.setEnabled(False)
         self.stats_label.setText("")
         self.status_label.setText("Output cleared.")
+

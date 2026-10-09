@@ -7,12 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CATEGORY_BY_EXT = {
-    "Documents": {".pdf", ".docx", ".doc", ".txt", ".md", ".rtf", ".odt", ".pptx"},
-    "Images": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"},
-    "Source Code": {".py", ".java", ".js", ".ts", ".c", ".cpp", ".cs", ".html", ".css", ".sql", ".ipynb"},
-    "Archives": {".zip", ".rar", ".7z", ".tar", ".gz"},
-    "Spreadsheets": {".xlsx", ".xls", ".csv"},
-    "Audio & Video": {".mp3", ".wav", ".mp4", ".mkv", ".mov"},
+    "Documents": {".pdf", ".docx", ".doc", ".txt", ".md", ".rtf", ".odt"},
+    "Presentations": {".pptx", ".ppt", ".key"},
+    "Spreadsheets": {".xlsx", ".xls", ".csv", ".tsv"},
+    "Images": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".psd"},
+    "Videos": {".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv"},
+    "Audio": {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"},
+    "Archives": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"},
+    "Source Code": {".py", ".java", ".js", ".ts", ".c", ".cpp", ".cs", ".html", ".css", ".sql", ".json", ".xml", ".yaml", ".yml", ".ipynb"},
+    "Creative Projects": {".aep", ".prproj", ".blend", ".unity", ".fig"},
 }
 
 
@@ -28,6 +31,28 @@ def category_for(ext: str) -> str:
         if ext.lower() in exts:
             return cat
     return "Other"
+
+
+def format_size_human(size_bytes: int) -> str:
+    """Format bytes into concise human-readable strings."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def size_category_for(size_bytes: int) -> str:
+    """Classify file size into Windows-safe category brackets."""
+    if size_bytes < 1024 * 1024:
+        return "Small (under 1MB)"
+    elif size_bytes < 50 * 1024 * 1024:
+        return "Medium (1MB-50MB)"
+    else:
+        return "Large (over 50MB)"
 
 
 def unique_destination(dst: Path, reserved: set[str] | None = None) -> Path:
@@ -51,6 +76,29 @@ def plan_by_type(file_paths: list[str], dest_root: str) -> list[Move]:
         dst = unique_destination(root / cat / src.name, reserved)
         reserved.add(str(dst))
         moves.append(Move(str(src), str(dst), f"{src.suffix or 'no extension'} -> {cat}"))
+    return moves
+
+
+def plan_by_type_and_size(file_paths: list[str], dest_root: str) -> list[Move]:
+    """Preview only: categorizes files by format and size bracket."""
+    root, reserved, moves = Path(dest_root), set(), []
+    for p in file_paths:
+        src = Path(p)
+        cat = category_for(src.suffix)
+        try:
+            sz = src.stat().st_size
+            sz_str = format_size_human(sz)
+            sz_cat = size_category_for(sz)
+        except OSError:
+            sz_str = "unknown"
+            sz_cat = "Small (under 1MB)"
+
+        target_dir = root / cat / sz_cat
+        if src.parent == target_dir:
+            continue
+        dst = unique_destination(target_dir / src.name, reserved)
+        reserved.add(str(dst))
+        moves.append(Move(str(src), str(dst), f"{cat} ({sz_str}) -> {cat}/{sz_cat}"))
     return moves
 
 

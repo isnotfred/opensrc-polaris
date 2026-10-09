@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Sequence
 from ..config import Settings
 from ..core.extractor import extract_text_from_file
 from .ollama_client import chat_stream
@@ -316,7 +316,7 @@ def _extract_doc_excerpt(path: Path, char_budget: int) -> str:
 
 
 def comparative_summary_stream(
-    file_paths: list[Path | str],
+    file_paths: Sequence[Path | str] | list[str],
     preset: str = "key_points",
     settings: Settings | None = None,
     length_level: int = 1,

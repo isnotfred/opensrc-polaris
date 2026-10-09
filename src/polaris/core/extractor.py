@@ -15,22 +15,40 @@ class DocumentChunk:
 
 
 def chunk_text(text: str, chunk_chars: int = 1200, overlap: int = 150) -> list[str]:
-    """Splits text into overlapping character windows."""
+    """Splits text into overlapping character windows, breaking at natural sentence or word boundaries."""
     if not text or not text.strip():
         return []
     chunks = []
     start = 0
     text_len = len(text)
-    step = max(1, chunk_chars - overlap)
+    
     while start < text_len:
         end = min(start + chunk_chars, text_len)
+        
+        # If not at the end of text, find a clean breaking boundary within the overlap margin
+        if end < text_len:
+            search_window = text[max(start, end - overlap) : end]
+            # Try to break at paragraph boundary, sentence end, or word space
+            best_break = -1
+            for delimiter in ("\n\n", "\n", ". ", "? ", "! ", " "):
+                pos = search_window.rfind(delimiter)
+                if pos != -1:
+                    best_break = max(start, end - overlap) + pos + len(delimiter)
+                    break
+            if best_break > start:
+                end = best_break
+
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
+
         if end >= text_len:
             break
-        start += step
+
+        # Advance start with overlap
+        start = max(start + 1, end - overlap)
     return chunks
+
 
 
 def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
@@ -52,7 +70,8 @@ def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
             pages = []
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                text = page.get_text("text").strip()
+                raw_text = page.get_text("text")
+                text = str(raw_text).strip() if isinstance(raw_text, str) else ""
                 if text:
                     pages.append((page_num + 1, text))
             return pages
