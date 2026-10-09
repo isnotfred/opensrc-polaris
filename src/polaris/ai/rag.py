@@ -155,7 +155,12 @@ def compress_history(
     return compressed
 
 
-def cross_encoder_score(query: str, chunk: DocumentChunk, base_score: float = 0.0) -> float:
+def cross_encoder_score(
+    query: str,
+    chunk: DocumentChunk,
+    base_score: float = 0.0,
+    q_words: list[str] | None = None,
+) -> float:
     """
     Computes a fast multi-signal cross-feature score between query and chunk:
     - Exact query phrase containment (+3.0)
@@ -177,19 +182,19 @@ def cross_encoder_score(query: str, chunk: DocumentChunk, base_score: float = 0.
         score += 3.0
 
     # 2. Token overlap & coverage
-    q_words = [w for w in re.findall(r"\w+", q_lower) if w not in STOPWORDS and len(w) >= 2]
-    if q_words:
+    words = q_words if q_words is not None else [w for w in re.findall(r"\w+", q_lower) if w not in STOPWORDS and len(w) >= 2]
+    if words:
         text_words = set(re.findall(r"\w+", text_lower))
-        matches = [w for w in q_words if w in text_words]
-        coverage = len(matches) / len(q_words)
+        matches = [w for w in words if w in text_words]
+        coverage = len(matches) / len(words)
         score += 2.5 * coverage
 
         # 3. Section and file match
         sec_lower = getattr(chunk, "section", "").lower()
         file_lower = getattr(chunk, "file_name", "").lower()
-        sec_matches = [w for w in q_words if w in sec_lower or w in file_lower]
+        sec_matches = [w for w in words if w in sec_lower or w in file_lower]
         if sec_matches:
-            score += 1.5 * (len(sec_matches) / len(q_words))
+            score += 1.5 * (len(sec_matches) / len(words))
 
         # 4. Proximity density: if >= 2 words match, check distance between first and last match
         if len(matches) >= 2:
@@ -274,9 +279,13 @@ def rerank_chunks(
     if use_llm and settings is not None:
         llm_scores = llm_rerank_candidates(settings, query, pool, top_n=rerank_pool_size)
 
+    # Pre-tokenize query once for ultra-fast candidate scoring
+    q_lower = query.lower().strip()
+    q_words = [w for w in re.findall(r"\w+", q_lower) if w not in STOPWORDS and len(w) >= 2]
+
     reranked: list[tuple[DocumentChunk, float]] = []
     for i, (chunk, base_score) in enumerate(pool):
-        cross_score = cross_encoder_score(query, chunk, base_score=base_score)
+        cross_score = cross_encoder_score(query, chunk, base_score=base_score, q_words=q_words)
         if i in llm_scores:
             final_score = (cross_score * 0.6) + (llm_scores[i] * 5.0 * 0.4)
         else:
@@ -285,6 +294,74 @@ def rerank_chunks(
 
     reranked.sort(key=lambda x: x[1], reverse=True)
     return reranked[:top_k]
+
+
+def deduplicate_chunks(
+    chunks_with_scores: list[tuple[DocumentChunk, float]],
+    overlap_threshold: float = 0.70,
+) -> list[tuple[DocumentChunk, float]]:
+    """
+    Suppresses redundant overlapping chunks from the same file to maximize
+    context diversity and prevent wasting LLM prompt budget on repeated lines.
+    """
+    if not chunks_with_scores:
+        return []
+
+    unique_results: list[tuple[DocumentChunk, float]] = []
+    seen_token_sets: list[tuple[str, set[str]]] = []
+
+    for chunk, score in chunks_with_scores:
+        chunk_tokens = set(re.findall(r"\w+", chunk.text.lower()))
+        if not chunk_tokens:
+            continue
+
+        is_duplicate = False
+        for prev_path, prev_tokens in seen_token_sets:
+            if prev_path == chunk.doc_path:
+                intersection = len(chunk_tokens & prev_tokens)
+                union = len(chunk_tokens | prev_tokens)
+                jaccard = intersection / union if union > 0 else 0.0
+                if jaccard >= overlap_threshold:
+                    is_duplicate = True
+                    break
+
+        if not is_duplicate:
+            unique_results.append((chunk, score))
+            seen_token_sets.append((chunk.doc_path, chunk_tokens))
+
+    return unique_results
+
+
+def assemble_prompt_context(
+    chunks: list[DocumentChunk],
+    max_context_chars: int = 4000,
+) -> tuple[str, list[DocumentChunk]]:
+    """
+    Assembles grounded source context string, enforcing character/token limits
+    to keep prompts well within CPU inference memory budgets and prevent context truncation.
+    Returns (context_str, accepted_chunks).
+    """
+    if not chunks:
+        return "", []
+
+    accepted: list[DocumentChunk] = []
+    context_parts: list[str] = []
+    current_chars = 0
+
+    for i, c in enumerate(chunks, 1):
+        sec_label = f" | Section: {c.section}" if getattr(c, "section", "") else ""
+        line_label = f" | Line: {c.start_line}" if getattr(c, "start_line", 1) > 1 else ""
+        part = f"[Source {i}: {c.file_name}{sec_label}{line_label} (Page {c.page})]\nPath: {c.doc_path}\n{c.text}"
+        part_len = len(part)
+
+        if current_chars + part_len > max_context_chars and accepted:
+            break
+
+        context_parts.append(part)
+        accepted.append(c)
+        current_chars += part_len
+
+    return "\n\n".join(context_parts), accepted
 
 
 class BM25Index:
@@ -300,12 +377,18 @@ class BM25Index:
         self.doc_len: list[int] = []
         self.doc_filenames: list[str] = []
         self.inverted_index: dict[str, list[tuple[int, int]]] = {}
+        self.filename_inverted_index: dict[str, set[int]] = {}
         self.idf: dict[str, float] = {}
 
     @staticmethod
     def tokenize(text: str) -> list[str]:
-        tokens = re.findall(r"\w+", text.lower())
-        return [t for t in tokens if len(t) >= 2 and t not in STOPWORDS]
+        parts = re.findall(r"[a-zA-Z0-9]+", text.lower())
+        tokens = [p for p in parts if len(p) >= 2 and p not in STOPWORDS]
+        compounds = re.findall(r"[a-zA-Z0-9]+(?:_[a-zA-Z0-9]+)+", text.lower())
+        for c in compounds:
+            if len(c) >= 3 and c not in STOPWORDS:
+                tokens.append(c)
+        return tokens
 
     def build(self, chunks: list[DocumentChunk]):
         self.corpus_size = len(chunks)
@@ -322,7 +405,13 @@ class BM25Index:
         df: dict[str, int] = {}
 
         for doc_idx, chunk in enumerate(chunks):
-            self.doc_filenames.append(chunk.file_name.lower())
+            fn_lower = chunk.file_name.lower()
+            self.doc_filenames.append(fn_lower)
+            for ft in self.tokenize(fn_lower):
+                if ft not in self.filename_inverted_index:
+                    self.filename_inverted_index[ft] = set()
+                self.filename_inverted_index[ft].add(doc_idx)
+
             tokens = self.tokenize(chunk.text)
             n_tokens = len(tokens)
             self.doc_len.append(n_tokens)
@@ -375,9 +464,9 @@ class BM25Index:
                 tf_norm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (dl / avgdl)))
                 scores[doc_idx] = scores.get(doc_idx, 0.0) + (idf * tf_norm)
 
-            # Boost matches occurring in the filename
-            for doc_idx in (candidate_indices if candidate_indices is not None else range(self.corpus_size)):
-                if t in self.doc_filenames[doc_idx]:
+            # Boost matches occurring in the filename (instant O(1) set lookup)
+            for doc_idx in self.filename_inverted_index.get(t, set()):
+                if candidate_indices is None or doc_idx in candidate_indices:
                     scores[doc_idx] = scores.get(doc_idx, 0.0) + 2.0
 
         if not scores:
@@ -848,7 +937,12 @@ class RagEngine:
             use_reranker=use_reranker,
             use_llm_reranker=use_llm_reranker,
         )
-        retrieved_chunks = [chunk for chunk, _score in matched]
+        # Deduplicate overlapping chunks from same file
+        deduped_matched = deduplicate_chunks(matched, overlap_threshold=0.70)
+        cand_chunks = [chunk for chunk, _score in deduped_matched]
+
+        # Assemble context within token/char budget (keeps prompt crisp on CPU)
+        context_str, retrieved_chunks = assemble_prompt_context(cand_chunks, max_context_chars=4000)
 
         if not retrieved_chunks:
             messages = [
@@ -865,16 +959,6 @@ class RagEngine:
             for token in chat_stream(self.settings, messages, options={"num_predict": 250, "num_ctx": 2048}):
                 yield token
             return []
-
-        # Keep context concise, structured, and section-grounded
-        context_parts = []
-        for i, c in enumerate(retrieved_chunks, 1):
-            sec_label = f" | Section: {c.section}" if getattr(c, "section", "") else ""
-            line_label = f" | Line: {c.start_line}" if getattr(c, "start_line", 1) > 1 else ""
-            context_parts.append(
-                f"[Source {i}: {c.file_name}{sec_label}{line_label} (Page {c.page})]\nPath: {c.doc_path}\n{c.text}"
-            )
-        context_str = "\n\n".join(context_parts)
 
         system_prompt = (
             "You are Polaris AI, an intelligent and precise local desktop document assistant.\n"

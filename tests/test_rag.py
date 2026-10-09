@@ -30,6 +30,8 @@ from polaris.ai.rag import (
     cross_encoder_score,
     llm_rerank_candidates,
     rerank_chunks,
+    deduplicate_chunks,
+    assemble_prompt_context,
     STOPWORDS,
 )
 from polaris.ui.chat_tab import (
@@ -958,3 +960,64 @@ def test_chat_with_docs_stream_multi_turn_json_serializable():
         gen = engine.chat_with_docs_stream("Continue", history=history_with_cited)
         tokens = list(gen)
         assert "".join(tokens) == "Continuing discussion."
+
+
+def test_deduplicate_chunks():
+    c1 = DocumentChunk("app.py", 1, "def calculate_total(): return sum(items)", 0)
+    c2 = DocumentChunk("app.py", 1, "def calculate_total(): return sum(items) # duplicate", 1)
+    c3 = DocumentChunk("utils.py", 1, "def format_currency(): return '$' + str(val)", 0)
+
+    candidates = [(c1, 0.9), (c2, 0.85), (c3, 0.7)]
+    deduped = deduplicate_chunks(candidates, overlap_threshold=0.7)
+    # c2 should be suppressed because it has >70% overlap with c1 from the same file
+    assert len(deduped) == 2
+    assert deduped[0][0] == c1
+    assert deduped[1][0] == c3
+
+
+def test_assemble_prompt_context_budget():
+    c1 = DocumentChunk("doc1.txt", 1, "A" * 500, 0)
+    c2 = DocumentChunk("doc2.txt", 1, "B" * 500, 0)
+    c3 = DocumentChunk("doc3.txt", 1, "C" * 500, 0)
+
+    # Budget of 1200 chars allows c1 and c2, but stops before c3 overflows
+    prompt_str, accepted = assemble_prompt_context([c1, c2, c3], max_context_chars=1200)
+    assert len(accepted) == 2
+    assert accepted[0] == c1
+    assert accepted[1] == c2
+    assert len(prompt_str) <= 1300
+
+
+def test_bm25_filename_inverted_index():
+    index = BM25Index()
+    c1 = DocumentChunk("payment_service.py", 1, "Handle stripe checkout logic", 0)
+    c2 = DocumentChunk("user_service.py", 1, "Handle user authentication", 1)
+    index.build([c1, c2])
+
+    assert "payment" in index.filename_inverted_index
+    assert 0 in index.filename_inverted_index["payment"]
+    assert "user" in index.filename_inverted_index
+    assert 1 in index.filename_inverted_index["user"]
+
+    # Search for "payment" should boost payment_service.py
+    results = index.search("payment")
+    assert results[0][0] == 0
+
+
+def test_chunk_markdown_tilde_code_fence():
+    md = """# Actual Title
+Text before code.
+
+~~~
+# This is a comment inside tilde code fence, not a header
+~~~
+
+## Real Subsection
+Text after code.
+"""
+    chunks = chunk_markdown(md, file_path="doc.md")
+    # There should only be two sections: "Actual Title" and "Actual Title > Real Subsection"
+    sections = [c.section for c in chunks]
+    assert any("Actual Title" in s for s in sections)
+    assert any("Real Subsection" in s for s in sections)
+    assert not any("comment inside tilde" in s for s in sections)

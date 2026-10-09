@@ -205,7 +205,7 @@ def chunk_markdown(
 
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("```"):
+        if stripped.startswith("```") or stripped.startswith("~~~"):
             in_code_fence = not in_code_fence
 
         if not in_code_fence:

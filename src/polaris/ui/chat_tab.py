@@ -316,6 +316,7 @@ class ChatTab(QWidget):
         self.query_worker: StreamQueryWorker | None = None
         self.current_assistant_text: str = ""
         self.is_streaming_active: bool = False
+        self._assistant_start_pos: int = 0
 
         self._init_ui()
 
@@ -609,10 +610,13 @@ class ChatTab(QWidget):
         self.current_assistant_text = ""
 
         # Prepare assistant bubble
+        cursor = self.chat_browser.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._assistant_start_pos = cursor.position()
         self.chat_browser.append(
             '<div style="margin: 8px 0; text-align: left;">'
-            '<div id="active_msg" style="background-color: #1e293b; color: #f8fafc; padding: 10px 14px; border-radius: 12px; display: inline-block; max-width: 90%; border: 1px solid #334155;">'
-            '<b style="color: #60a5fa;">Polaris:</b><br><span id="content">thinking...</span></div></div>'
+            '<div style="background-color: #1e293b; color: #f8fafc; padding: 10px 14px; border-radius: 12px; display: inline-block; max-width: 90%; border: 1px solid #334155;">'
+            '<b style="color: #60a5fa;">Polaris:</b><br><span id="content" style="color: #94a3b8;">thinking...</span></div></div>'
         )
 
         file_types = self._get_selected_file_types()
@@ -678,10 +682,9 @@ class ChatTab(QWidget):
             </div>
         </div>
         """
-        doc = self.chat_browser.document()
         cursor = self.chat_browser.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.select(cursor.SelectionType.BlockUnderCursor)
+        cursor.setPosition(self._assistant_start_pos)
+        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
         cursor.insertHtml(html)
         self.chat_browser.verticalScrollBar().setValue(
@@ -729,6 +732,7 @@ class ChatTab(QWidget):
     def clear_chat(self):
         self.history.clear()
         self.last_cited_chunks = []
+        self._assistant_start_pos = 0
         self.inspect_sources_btn.setEnabled(False)
         self.inspect_sources_btn.setText("🔎 Inspect Source Citations")
         self.chat_browser.clear()
