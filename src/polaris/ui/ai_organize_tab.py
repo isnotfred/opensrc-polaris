@@ -126,10 +126,13 @@ class AIOrganizeTab(QWidget):
         self.watch_folder = str(Path.home() / "Downloads")
         self.active_toasts: list[SuggestionToast] = []
         self.analyze_workers: list[AnalyzeIncomingWorker] = []
+        self._session_file_count = 0
 
         self.setAcceptDrops(True)
         self._init_ui()
         self.refresh_history()
+        # Auto-start the watcher so users get toasts immediately on launch
+        self._toggle_watcher()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -270,6 +273,9 @@ class AIOrganizeTab(QWidget):
         self.watcher_status = QLabel(f"Folder: {self.watch_folder} (Inactive)")
         self.watcher_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
 
+        self.watcher_count_label = QLabel("0 files detected")
+        self.watcher_count_label.setStyleSheet("color: #64748b; font-size: 11px;")
+
         change_watch_btn = QPushButton("Change Folder...")
         change_watch_btn.clicked.connect(self._change_watch_folder)
 
@@ -282,6 +288,7 @@ class AIOrganizeTab(QWidget):
         test_trigger_btn.clicked.connect(self._test_trigger_incoming)
 
         wg_layout.addWidget(self.watcher_status, 1)
+        wg_layout.addWidget(self.watcher_count_label)
         wg_layout.addWidget(change_watch_btn)
         wg_layout.addWidget(self.toggle_watcher_btn)
         wg_layout.addWidget(test_trigger_btn)
@@ -323,8 +330,12 @@ class AIOrganizeTab(QWidget):
                 QMessageBox.warning(self, "Folder Not Found", f"Cannot watch {self.watch_folder}: folder does not exist.")
                 return
 
+            self._session_file_count = 0
+            self.watcher_count_label.setText("0 files detected")
+
             self.watcher = DownloadWatcherWorker(p)
             self.watcher.new_file_ready.connect(self._on_incoming_file_detected)
+            self.watcher.session_count.connect(self._on_session_count_updated)
             self.watcher.start()
             self.toggle_watcher_btn.setText("⏹ Stop Live Watcher")
             self.toggle_watcher_btn.setStyleSheet("font-weight: bold; padding: 4px 12px; background-color: #dc2626; color: white;")
@@ -342,15 +353,26 @@ class AIOrganizeTab(QWidget):
             if was_running:
                 self._toggle_watcher()
 
+    def _on_session_count_updated(self, count: int):
+        self.watcher_count_label.setText(f"{count} file{'s' if count != 1 else ''} detected this session")
+        self.watcher_count_label.setStyleSheet("color: #4ade80; font-size: 11px; font-weight: bold;")
+
     def _on_incoming_file_detected(self, file_path: str):
+        # Clean up finished workers before adding a new one
+        self.analyze_workers = [w for w in self.analyze_workers if w.isRunning()]
+
         worker = AnalyzeIncomingWorker(file_path, self.settings)
         worker.ready.connect(self._show_suggestion_toast)
         self.analyze_workers.append(worker)
         worker.start()
 
     def _show_suggestion_toast(self, suggestion: dict):
-        toast = SuggestionToast(suggestion, self.settings)
+        # Clean up closed toasts before computing stack position
+        self.active_toasts = [t for t in self.active_toasts if t.isVisible()]
+        stack_idx = len(self.active_toasts)
+        toast = SuggestionToast(suggestion, self.settings, stack_index=stack_idx)
         toast.applied.connect(lambda _s, _d: self.refresh_history())
+        toast.dismissed.connect(self._on_toast_dismissed)
         self.active_toasts.append(toast)
         toast.show()
 
@@ -363,6 +385,10 @@ class AIOrganizeTab(QWidget):
         )
         if f:
             self._on_incoming_file_detected(f)
+
+    def _on_toast_dismissed(self):
+        """Prune the active_toasts list whenever any toast is closed."""
+        self.active_toasts = [t for t in self.active_toasts if t.isVisible()]
 
     # Drag & Drop Events
     def dragEnterEvent(self, event):
@@ -592,7 +618,9 @@ class AIOrganizeTab(QWidget):
             "You can undo this batch at any time using the History & Undo section.",
         )
         self.refresh_history()
-        self.generate_plan(is_rule_based=False)
+        # Only re-plan if the user still has a folder selected
+        if self.src_edit.text().strip():
+            self.generate_plan(is_rule_based=False)
 
     def _apply_failed(self, err: str):
         self.progress_bar.hide()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import List
 
@@ -113,6 +114,11 @@ def plan_with_ai(
     return all_moves
 
 
+# Timeout (seconds) for the Ollama round-trip in the watcher path.
+# Keeps AnalyzeIncomingWorker from blocking indefinitely if the model is slow.
+_WATCHER_AI_TIMEOUT_SEC = 15
+
+
 def suggest_single_file_placement(
     file_path: str | Path,
     dest_root: str | Path | None = None,
@@ -123,12 +129,16 @@ def suggest_single_file_placement(
     - Clean, standardized filename
     - Target subfolder
     - Reason
+
+    The Ollama call is wrapped in a threading timeout so this function always
+    returns within ~15 s even if the model is busy or unreachable.
     """
     settings = settings or Settings()
     p = Path(file_path)
     if not p.exists():
         return {}
 
+    # --- Build content snippet ------------------------------------------------
     snippet = ""
     ext = p.suffix.lower()
     if ext in (".pdf", ".docx", ".doc", ".txt", ".md", ".py", ".json", ".csv", ".html"):
@@ -139,6 +149,7 @@ def suggest_single_file_placement(
         except Exception:
             pass
 
+    # --- Build prompt ---------------------------------------------------------
     prompt = (
         f"A user just downloaded or saved this file:\n"
         f"Original Name: {p.name}\n"
@@ -153,37 +164,52 @@ def suggest_single_file_placement(
         '{"suggested_filename": "clean_name.ext", "suggested_folder": "Documents/Invoices", "reason": "why"}'
     )
 
-    try:
-        resp = chat(
-            settings,
-            [
-                {"role": "system", "content": "You are an intelligent desktop file organizer. Output JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            options={"num_predict": 250, "num_ctx": 2048, "temperature": 0.1}
-        )
-        parsed = parse_model_json(resp)
-        new_name = parsed.get("suggested_filename", p.name).strip()
-        folder = parsed.get("suggested_folder", "Organized").strip("/\\ ")
-        reason = parsed.get("reason", "Smart auto-placement").strip()
+    # --- Call Ollama with a hard timeout so we never hang --------------------
+    result: dict = {}
+    exc_holder: list[Exception] = []
 
-        # Ensure extension isn't dropped by model
-        if not Path(new_name).suffix and p.suffix:
-            new_name += p.suffix
+    def _do_chat() -> None:
+        try:
+            resp = chat(
+                settings,
+                [
+                    {"role": "system", "content": "You are an intelligent desktop file organizer. Output JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"num_predict": 250, "num_ctx": 2048, "temperature": 0.1},
+            )
+            parsed = parse_model_json(resp)
+            new_name = parsed.get("suggested_filename", p.name).strip()
+            folder = parsed.get("suggested_folder", "Organized").strip("/\\ ")
+            reason = parsed.get("reason", "Smart auto-placement").strip()
 
-        return {
-            "original_path": str(p),
-            "suggested_filename": new_name,
-            "suggested_folder": folder,
-            "reason": reason,
-        }
-    except Exception:
-        from ..core.organizer import category_for
-        cat = category_for(p.suffix)
-        return {
-            "original_path": str(p),
-            "suggested_filename": p.name,
-            "suggested_folder": cat,
-            "reason": f"Standard {cat} categorization",
-        }
+            # Ensure extension isn't dropped by the model
+            if not Path(new_name).suffix and p.suffix:
+                new_name += p.suffix
+
+            result.update({
+                "original_path": str(p),
+                "suggested_filename": new_name,
+                "suggested_folder": folder,
+                "reason": reason,
+            })
+        except Exception as e:  # noqa: BLE001
+            exc_holder.append(e)
+
+    t = threading.Thread(target=_do_chat, daemon=True)
+    t.start()
+    t.join(timeout=_WATCHER_AI_TIMEOUT_SEC)
+
+    if result:
+        return result
+
+    # Timed-out or errored — fall back to rule-based category
+    from ..core.organizer import category_for
+    cat = category_for(p.suffix)
+    return {
+        "original_path": str(p),
+        "suggested_filename": p.name,
+        "suggested_folder": cat,
+        "reason": f"Quick suggestion ({cat}) — AI response timed out or unavailable",
+    }
 
