@@ -111,3 +111,79 @@ def plan_with_ai(
                 all_moves.append(Move(src=rm.src, dst=str(dst), reason=f"Rule-based (fallback): {rm.reason}"))
 
     return all_moves
+
+
+def suggest_single_file_placement(
+    file_path: str | Path,
+    dest_root: str | Path | None = None,
+    settings: Settings | None = None,
+) -> dict:
+    """
+    Analyzes an incoming single file and suggests:
+    - Clean, standardized filename
+    - Target subfolder
+    - Reason
+    """
+    settings = settings or Settings()
+    p = Path(file_path)
+    if not p.exists():
+        return {}
+
+    snippet = ""
+    ext = p.suffix.lower()
+    if ext in (".pdf", ".docx", ".doc", ".txt", ".md", ".py", ".json", ".csv", ".html"):
+        try:
+            pages = extract_text_from_file(p)
+            if pages and pages[0][1].strip():
+                snippet = " ".join(pages[0][1].split())[:180]
+        except Exception:
+            pass
+
+    prompt = (
+        f"A user just downloaded or saved this file:\n"
+        f"Original Name: {p.name}\n"
+    )
+    if snippet:
+        prompt += f"Document Content Preview: {snippet}\n"
+
+    prompt += (
+        "\nProvide a clean standardized filename (keep the same extension) and a logical subfolder "
+        "(e.g. Documents/Invoices, Photos/2024, Software/Code, etc.).\n"
+        "Output ONLY JSON in this format:\n"
+        '{"suggested_filename": "clean_name.ext", "suggested_folder": "Documents/Invoices", "reason": "why"}'
+    )
+
+    try:
+        resp = chat(
+            settings,
+            [
+                {"role": "system", "content": "You are an intelligent desktop file organizer. Output JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            options={"num_predict": 250, "num_ctx": 2048, "temperature": 0.1}
+        )
+        parsed = parse_model_json(resp)
+        new_name = parsed.get("suggested_filename", p.name).strip()
+        folder = parsed.get("suggested_folder", "Organized").strip("/\\ ")
+        reason = parsed.get("reason", "Smart auto-placement").strip()
+
+        # Ensure extension isn't dropped by model
+        if not Path(new_name).suffix and p.suffix:
+            new_name += p.suffix
+
+        return {
+            "original_path": str(p),
+            "suggested_filename": new_name,
+            "suggested_folder": folder,
+            "reason": reason,
+        }
+    except Exception:
+        from ..core.organizer import category_for
+        cat = category_for(p.suffix)
+        return {
+            "original_path": str(p),
+            "suggested_filename": p.name,
+            "suggested_folder": cat,
+            "reason": f"Standard {cat} categorization",
+        }
+

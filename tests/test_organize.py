@@ -12,6 +12,8 @@ from polaris.config import Settings
 from polaris.core.organizer import Move, apply_moves, plan_by_type, undo_batch, unique_destination
 from polaris.db.database import connect
 from polaris.ui.ai_organize_tab import AIOrganizeTab
+from polaris.ui.suggestion_toast import SuggestionToast
+from polaris.ai.ai_organizer import suggest_single_file_placement
 
 
 @pytest.fixture(scope="session")
@@ -85,8 +87,38 @@ def test_organize_tab_manual_destination_edit_and_filter(qapp, tmp_path):
     custom_dst = str(in_dir / "CustomFolder" / "custom_invoice.pdf")
     tab.table.item(0, 2).setText(custom_dst)
 
-    # Verify apply_selected picks up custom destination from the cell
-    tab.copy_radio.setChecked(True)
     # Check that item flag is editable
     flags = tab.table.item(0, 2).flags()
     assert flags & Qt.ItemFlag.ItemIsEditable
+
+
+def test_suggest_single_file_fallback(tmp_path):
+    f = tmp_path / "receipt_uber.txt"
+    f.write_text("UBER RECEIPT 2024 Total: $25.50")
+    res = suggest_single_file_placement(f)
+    assert "suggested_filename" in res
+    assert "suggested_folder" in res
+    assert res["original_path"] == str(f)
+
+
+def test_suggestion_toast_apply(qapp, tmp_path):
+    f = tmp_path / "test_download.pdf"
+    f.write_text("download dummy content")
+
+    settings = Settings(data_dir=tmp_path / "data")
+    suggestion = {
+        "original_path": str(f),
+        "suggested_filename": "Renamed_Doc.pdf",
+        "suggested_folder": "Organized_Docs",
+        "reason": "Test placement"
+    }
+
+    toast = SuggestionToast(suggestion, settings)
+    assert toast.name_edit.text() == "Renamed_Doc.pdf"
+    target_folder = tmp_path / "Organized_Docs"
+    toast.folder_edit.setText(str(target_folder))
+
+    # Test apply
+    toast.apply_suggestion()
+    assert not f.exists()  # Successfully moved
+    assert (target_folder / "Renamed_Doc.pdf").exists()

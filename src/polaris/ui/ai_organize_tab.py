@@ -1,4 +1,4 @@
-"""AI-Powered Organize tab: Natural language file sorting with Drag & Drop, editable preview, search filter, and undo."""
+"""AI-Powered Organize tab: Natural language file sorting with Drag & Drop, editable preview, search filter, and background download watcher."""
 from __future__ import annotations
 
 import os
@@ -28,8 +28,10 @@ from PySide6.QtWidgets import (
 
 from ..config import Settings
 from ..core.organizer import Move, apply_moves, plan_by_type, undo_batch
-from ..ai.ai_organizer import plan_with_ai
+from ..core.watcher import DownloadWatcherWorker
+from ..ai.ai_organizer import plan_with_ai, suggest_single_file_placement
 from ..db.database import connect
+from .suggestion_toast import SuggestionToast
 
 
 class AIPlanWorker(QThread):
@@ -93,6 +95,23 @@ class UndoWorker(QThread):
             self.failed.emit(str(e))
 
 
+class AnalyzeIncomingWorker(QThread):
+    ready = Signal(dict)
+
+    def __init__(self, file_path: str, settings: Settings):
+        super().__init__()
+        self.file_path = file_path
+        self.settings = settings
+
+    def run(self):
+        try:
+            res = suggest_single_file_placement(self.file_path, settings=self.settings)
+            if res:
+                self.ready.emit(res)
+        except Exception:
+            pass
+
+
 class AIOrganizeTab(QWidget):
     def __init__(self, settings: Settings | None = None):
         super().__init__()
@@ -101,6 +120,12 @@ class AIOrganizeTab(QWidget):
         self.plan_worker: AIPlanWorker | None = None
         self.apply_worker: ApplyWorker | None = None
         self.undo_worker: UndoWorker | None = None
+
+        # Background Watcher state
+        self.watcher: DownloadWatcherWorker | None = None
+        self.watch_folder = str(Path.home() / "Downloads")
+        self.active_toasts: list[SuggestionToast] = []
+        self.analyze_workers: list[AnalyzeIncomingWorker] = []
 
         self.setAcceptDrops(True)
         self._init_ui()
@@ -238,7 +263,31 @@ class AIOrganizeTab(QWidget):
 
         layout.addWidget(table_group, 1)
 
-        # 4. History & Undo
+        # 4. Live Downloads Watcher Panel
+        watcher_group = QGroupBox("⚡ Background Downloads Monitor (Desktop Toasts)")
+        wg_layout = QHBoxLayout(watcher_group)
+
+        self.watcher_status = QLabel(f"Folder: {self.watch_folder} (Inactive)")
+        self.watcher_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+
+        change_watch_btn = QPushButton("Change Folder...")
+        change_watch_btn.clicked.connect(self._change_watch_folder)
+
+        self.toggle_watcher_btn = QPushButton("▶ Start Live Watcher")
+        self.toggle_watcher_btn.setStyleSheet("font-weight: bold; padding: 4px 12px;")
+        self.toggle_watcher_btn.clicked.connect(self._toggle_watcher)
+
+        test_trigger_btn = QPushButton("Simulate New File")
+        test_trigger_btn.setToolTip("Test the AI rename toast on a sample file")
+        test_trigger_btn.clicked.connect(self._test_trigger_incoming)
+
+        wg_layout.addWidget(self.watcher_status, 1)
+        wg_layout.addWidget(change_watch_btn)
+        wg_layout.addWidget(self.toggle_watcher_btn)
+        wg_layout.addWidget(test_trigger_btn)
+        layout.addWidget(watcher_group)
+
+        # 5. History & Undo
         history_group = QGroupBox("History & Undo")
         hg_layout = QHBoxLayout(history_group)
 
@@ -257,6 +306,63 @@ class AIOrganizeTab(QWidget):
         hg_layout.addStretch()
 
         layout.addWidget(history_group)
+
+    # Background Watcher Controls
+    def _toggle_watcher(self):
+        if self.watcher and self.watcher.isRunning():
+            self.watcher.stop()
+            self.watcher.wait()
+            self.watcher = None
+            self.toggle_watcher_btn.setText("▶ Start Live Watcher")
+            self.toggle_watcher_btn.setStyleSheet("font-weight: bold; padding: 4px 12px;")
+            self.watcher_status.setText(f"Folder: {self.watch_folder} (Inactive)")
+            self.watcher_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        else:
+            p = Path(self.watch_folder)
+            if not p.is_dir():
+                QMessageBox.warning(self, "Folder Not Found", f"Cannot watch {self.watch_folder}: folder does not exist.")
+                return
+
+            self.watcher = DownloadWatcherWorker(p)
+            self.watcher.new_file_ready.connect(self._on_incoming_file_detected)
+            self.watcher.start()
+            self.toggle_watcher_btn.setText("⏹ Stop Live Watcher")
+            self.toggle_watcher_btn.setStyleSheet("font-weight: bold; padding: 4px 12px; background-color: #dc2626; color: white;")
+            self.watcher_status.setText(f"🟢 Monitoring {self.watch_folder} — toasts will pop up when new files land!")
+            self.watcher_status.setStyleSheet("color: #4ade80; font-weight: bold; font-size: 12px;")
+
+    def _change_watch_folder(self):
+        f = QFileDialog.getExistingDirectory(self, "Select folder to monitor", self.watch_folder)
+        if f:
+            was_running = self.watcher and self.watcher.isRunning()
+            if was_running:
+                self._toggle_watcher()
+            self.watch_folder = f
+            self.watcher_status.setText(f"Folder: {self.watch_folder} (Inactive)")
+            if was_running:
+                self._toggle_watcher()
+
+    def _on_incoming_file_detected(self, file_path: str):
+        worker = AnalyzeIncomingWorker(file_path, self.settings)
+        worker.ready.connect(self._show_suggestion_toast)
+        self.analyze_workers.append(worker)
+        worker.start()
+
+    def _show_suggestion_toast(self, suggestion: dict):
+        toast = SuggestionToast(suggestion, self.settings)
+        toast.applied.connect(lambda _s, _d: self.refresh_history())
+        self.active_toasts.append(toast)
+        toast.show()
+
+    def _test_trigger_incoming(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select a file to test AI auto-placement toast",
+            str(Path.cwd() / "sample_files"),
+            "All Files (*.*)"
+        )
+        if f:
+            self._on_incoming_file_detected(f)
 
     # Drag & Drop Events
     def dragEnterEvent(self, event):
@@ -438,7 +544,6 @@ class AIOrganizeTab(QWidget):
                 reason_item = self.table.item(row, 3)
 
                 if src_item and dst_item:
-                    # Read the destination cell value (handles manual user edits!)
                     selected_moves.append(Move(
                         src=src_item.text().strip(),
                         dst=dst_item.text().strip(),
