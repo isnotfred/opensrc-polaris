@@ -94,6 +94,7 @@ pytest
 ---
 
 ## Documentation
+* [docs/TEAM_ROLES_WORKFLOW.md](docs/TEAM_ROLES_WORKFLOW.md) — Simultaneous collaboration guide, developer roles, and git workflow.
 * [docs/FEATURES.md](docs/FEATURES.md) — Comprehensive guide to all 3 core features, safety guarantees, and settings.
 * [docs/DEVELOPMENT_LOG.md](docs/DEVELOPMENT_LOG.md) — Technical history of bug fixes, architecture evolution, and CPU tuning.
 * [docs/PLAN.md](docs/PLAN.md) — High-level architecture and hardware design guidelines.
