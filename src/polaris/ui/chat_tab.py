@@ -704,6 +704,8 @@ class ChatTab(QWidget):
 
     def _on_stream_failed(self, err: str):
         self._reset_input_ui()
+        if self.history and self.history[-1].get("role") == "user":
+            self.history.pop()
         self._append_system_msg(f"⚠️ Error: {err}")
 
     def _append_user_msg(self, text: str):

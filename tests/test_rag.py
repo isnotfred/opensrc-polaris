@@ -1,4 +1,4 @@
-"""Dedicated test suite for Role 2: Document Extraction, FAISS Indexing, Hybrid RAG, and Chat UI."""
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import numpy as np
@@ -26,6 +26,7 @@ from polaris.ai.rag import (
     reciprocal_rank_fusion,
     expand_query_terms,
     compress_history,
+    clean_history_messages,
     cross_encoder_score,
     llm_rerank_candidates,
     rerank_chunks,
@@ -913,3 +914,47 @@ def test_source_viewer_deep_linking(qapp):
     finally:
         dialog.deleteLater()
         qapp.processEvents()
+
+
+def test_multi_turn_history_with_document_chunks_serializable():
+    chunk = DocumentChunk("sample.py", 1, "code text", 0, section="foo", start_line=10, end_line=12)
+    history = [
+        {"role": "user", "content": "What is in sample.py?"},
+        {"role": "assistant", "content": "It has code.", "cited": [chunk]},
+        {"role": "user", "content": "Continue"},
+    ]
+
+    cleaned = clean_history_messages(history, max_turns=2)
+    # Must be JSON serializable without throwing TypeError
+    dumped = json.dumps(cleaned)
+    assert "code text" not in dumped  # chunk text not in raw message dict
+    assert "What is in sample.py?" in dumped
+    assert "It has code." in dumped
+
+    compressed = compress_history(history, max_recent_turns=2)
+    dumped_compressed = json.dumps(compressed)
+    assert "It has code." in dumped_compressed
+
+
+def test_chat_with_docs_stream_multi_turn_json_serializable():
+    engine = RagEngine()
+    chunk = DocumentChunk("test.txt", 1, "Python is a programming language.", 0)
+    engine.chunks = [chunk]
+
+    history_with_cited = [
+        {"role": "user", "content": "Tell me about Python"},
+        {"role": "assistant", "content": "Python is high-level.", "cited": [chunk]},
+    ]
+
+    # Mock chat_stream to verify payload messages are strictly JSON serializable
+    def mock_chat_stream(settings, messages, options=None):
+        # This will raise TypeError if DocumentChunk is in messages
+        serialized = json.dumps(messages)
+        assert "Python is high-level." in serialized
+        yield "Continuing "
+        yield "discussion."
+
+    with patch("polaris.ai.rag.chat_stream", side_effect=mock_chat_stream):
+        gen = engine.chat_with_docs_stream("Continue", history=history_with_cited)
+        tokens = list(gen)
+        assert "".join(tokens) == "Continuing discussion."

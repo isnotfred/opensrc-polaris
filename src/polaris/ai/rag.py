@@ -91,6 +91,26 @@ def expand_query_terms(query: str, hypothetical_text: str, max_terms: int = 5) -
     return query
 
 
+def clean_history_messages(history: list[dict] | None, max_turns: int = 2) -> list[dict]:
+    """
+    Extracts clean {'role', 'content'} message dicts from history,
+    stripping internal metadata like DocumentChunk that cannot be serialized to JSON by Ollama.
+    """
+    if not history:
+        return []
+    slice_count = max_turns * 2 if max_turns > 0 else len(history)
+    selected = history[-slice_count:]
+    cleaned = []
+    for m in selected:
+        content = m.get("content", "")
+        if content:
+            cleaned.append({
+                "role": str(m.get("role", "user")),
+                "content": str(content),
+            })
+    return cleaned
+
+
 def compress_history(
     history: list[dict],
     max_recent_turns: int = 2,
@@ -99,9 +119,13 @@ def compress_history(
     """
     Compresses older conversation history into a concise distillation
     to keep prompt token count well within CPU inference limits.
+    Guarantees all output messages contain ONLY clean 'role' and 'content' string keys.
     """
-    if not history or len(history) <= max_recent_turns * 2:
-        return list(history)
+    if not history:
+        return []
+
+    if len(history) <= max_recent_turns * 2:
+        return clean_history_messages(history, max_turns=max_recent_turns)
 
     split_idx = len(history) - (max_recent_turns * 2)
     older = history[:split_idx]
@@ -127,7 +151,7 @@ def compress_history(
     compressed: list[dict] = [
         {"role": "system", "content": f"[Summary of earlier discussion: {summary_text}]"}
     ]
-    compressed.extend(recent)
+    compressed.extend(clean_history_messages(recent, max_turns=max_recent_turns))
     return compressed
 
 
@@ -831,7 +855,11 @@ class RagEngine:
                 {"role": "system", "content": "You are a helpful desktop assistant. Keep answers concise."},
             ]
             if history:
-                messages.extend(compress_history(history, max_recent_turns=2) if compress_history_enabled else history[-2:])
+                messages.extend(
+                    compress_history(history, max_recent_turns=2)
+                    if compress_history_enabled
+                    else clean_history_messages(history, max_turns=2)
+                )
             messages.append({"role": "user", "content": question})
 
             for token in chat_stream(self.settings, messages, options={"num_predict": 250, "num_ctx": 2048}):
@@ -859,10 +887,11 @@ class RagEngine:
 
         messages = [{"role": "system", "content": system_prompt}]
         if history:
-            if compress_history_enabled:
-                messages.extend(compress_history(history, max_recent_turns=2))
-            else:
-                messages.extend(history[-2:])
+            messages.extend(
+                compress_history(history, max_recent_turns=2)
+                if compress_history_enabled
+                else clean_history_messages(history, max_turns=2)
+            )
         messages.append({"role": "user", "content": question})
 
         for token in chat_stream(self.settings, messages, options={"num_predict": 350, "num_ctx": 2048}):
