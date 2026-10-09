@@ -1,8 +1,11 @@
-"""AI-Powered Organize tab: Natural language and intelligent file sorting with Ollama, safe preview, and undo."""
+"""AI-Powered Organize tab: Natural language file sorting with Drag & Drop, editable preview, search filter, and undo."""
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -12,9 +15,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -50,20 +55,21 @@ class AIPlanWorker(QThread):
 
 
 class ApplyWorker(QThread):
-    done = Signal(str, int)  # batch_id, count
+    done = Signal(str, int, str)  # batch_id, count, mode
     failed = Signal(str)
 
-    def __init__(self, db_path: Path, moves: list[Move]):
+    def __init__(self, db_path: Path, moves: list[Move], mode: str = "move"):
         super().__init__()
         self.db_path = db_path
         self.moves = moves
+        self.mode = mode
 
     def run(self):
         try:
             conn = connect(self.db_path)
-            batch_id = apply_moves(conn, self.moves)
+            batch_id = apply_moves(conn, self.moves, mode=self.mode)
             conn.close()
-            self.done.emit(batch_id, len(self.moves))
+            self.done.emit(batch_id, len(self.moves), self.mode)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -96,20 +102,21 @@ class AIOrganizeTab(QWidget):
         self.apply_worker: ApplyWorker | None = None
         self.undo_worker: UndoWorker | None = None
 
+        self.setAcceptDrops(True)
         self._init_ui()
         self.refresh_history()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
-        # 1. Target Folder
-        folder_group = QGroupBox("1. Target Folder & Files")
+        # 1. Target Folder & Drag-and-Drop Zone
+        folder_group = QGroupBox("1. Target Folder & Files (Drag & Drop Supported)")
         fg_layout = QVBoxLayout(folder_group)
 
         src_row = QHBoxLayout()
         src_label = QLabel("Folder:")
         self.src_edit = QLineEdit()
-        self.src_edit.setPlaceholderText("Select the folder containing files you want to organize...")
+        self.src_edit.setPlaceholderText("Drag and drop a folder here, or click Browse...")
         src_btn = QPushButton("Browse...")
         src_btn.clicked.connect(self._browse_source)
         src_row.addWidget(src_label)
@@ -118,15 +125,24 @@ class AIOrganizeTab(QWidget):
 
         opts_row = QHBoxLayout()
         self.subfolders_check = QCheckBox("Include subfolders (recursive)")
+
+        # Mode selection: Move vs Copy
         opts_row.addWidget(self.subfolders_check)
+        opts_row.addSpacing(20)
+        opts_row.addWidget(QLabel("Action Mode:"))
+        self.move_radio = QRadioButton("Move Files (Default)")
+        self.move_radio.setChecked(True)
+        self.copy_radio = QRadioButton("Copy Files (Preserve Originals)")
+        opts_row.addWidget(self.move_radio)
+        opts_row.addWidget(self.copy_radio)
         opts_row.addStretch()
 
         fg_layout.addLayout(src_row)
         fg_layout.addLayout(opts_row)
         layout.addWidget(folder_group)
 
-        # 2. AI Instructions
-        ai_group = QGroupBox("2. Local AI Instructions (Powered by Ollama Llama 3.2)")
+        # 2. AI Instructions & Presets
+        ai_group = QGroupBox("2. Local AI Instructions (Powered by Qwen 2.5 / Llama 3.2)")
         ai_layout = QVBoxLayout(ai_group)
 
         self.instruction_edit = QLineEdit()
@@ -153,7 +169,7 @@ class AIOrganizeTab(QWidget):
         preset_row.addStretch()
 
         self.ai_plan_btn = QPushButton("✨ Plan with Local AI")
-        self.ai_plan_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 12px;")
+        self.ai_plan_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 14px;")
         self.ai_plan_btn.clicked.connect(lambda: self.generate_plan(is_rule_based=False))
         preset_row.addWidget(self.ai_plan_btn)
 
@@ -171,36 +187,48 @@ class AIOrganizeTab(QWidget):
         layout.addWidget(self.progress_bar)
 
         # 3. Preview Table & Selection
-        table_group = QGroupBox("3. Proposed Moves (Preview)")
+        table_group = QGroupBox("3. Proposed Moves (Preview & Customize)")
         tg_layout = QVBoxLayout(table_group)
 
-        sel_row = QHBoxLayout()
+        top_table_row = QHBoxLayout()
         sel_all_btn = QPushButton("Select All")
         sel_all_btn.clicked.connect(lambda: self._set_all_checked(True))
         sel_none_btn = QPushButton("Select None")
         sel_none_btn.clicked.connect(lambda: self._set_all_checked(False))
+
+        # Real-time search filter in preview table
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("🔍 Filter preview table (e.g. .pdf, invoices, 2024)...")
+        self.filter_edit.textChanged.connect(self._on_filter_changed)
+
         self.count_label = QLabel("No preview generated.")
 
-        sel_row.addWidget(sel_all_btn)
-        sel_row.addWidget(sel_none_btn)
-        sel_row.addWidget(self.count_label, 1)
-        tg_layout.addLayout(sel_row)
+        top_table_row.addWidget(sel_all_btn)
+        top_table_row.addWidget(sel_none_btn)
+        top_table_row.addWidget(self.filter_edit, 1)
+        top_table_row.addWidget(self.count_label)
+        tg_layout.addLayout(top_table_row)
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels([
-            "Apply", "File", "Proposed Destination", "AI Reason", "Original Path"
+            "Apply", "File", "Proposed Destination (Double-click to edit)", "AI Reason", "Original Path"
         ])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+
+        # Enable right-click context menu
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+
         tg_layout.addWidget(self.table)
 
         apply_row = QHBoxLayout()
-        self.apply_btn = QPushButton("Apply Selected Moves")
+        self.apply_btn = QPushButton("Apply Selected Operations")
         self.apply_btn.setEnabled(False)
-        self.apply_btn.setStyleSheet("font-weight: bold; padding: 6px 14px;")
+        self.apply_btn.setStyleSheet("font-weight: bold; padding: 6px 16px; font-size: 13px;")
         self.apply_btn.clicked.connect(self.apply_selected)
 
         self.status_label = QLabel("")
@@ -216,7 +244,7 @@ class AIOrganizeTab(QWidget):
 
         hg_layout.addWidget(QLabel("Recent Batches:"))
         self.batch_combo = QComboBox()
-        self.batch_combo.setMinimumWidth(260)
+        self.batch_combo.setMinimumWidth(280)
         hg_layout.addWidget(self.batch_combo)
 
         self.undo_btn = QPushButton("Undo Selected Batch")
@@ -230,10 +258,82 @@ class AIOrganizeTab(QWidget):
 
         layout.addWidget(history_group)
 
+    # Drag & Drop Events
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if Path(path).is_dir():
+                self.src_edit.setText(path)
+                event.acceptProposedAction()
+                self.generate_plan(is_rule_based=False)
+
     def _browse_source(self):
         folder = QFileDialog.getExistingDirectory(self, "Select folder to organize")
         if folder:
             self.src_edit.setText(folder)
+
+    def _on_filter_changed(self, text: str):
+        query = text.strip().lower()
+        for row in range(self.table.rowCount()):
+            if not query:
+                self.table.setRowHidden(row, False)
+                continue
+
+            file_text = (self.table.item(row, 1).text() if self.table.item(row, 1) else "").lower()
+            dst_text = (self.table.item(row, 2).text() if self.table.item(row, 2) else "").lower()
+            reason_text = (self.table.item(row, 3).text() if self.table.item(row, 3) else "").lower()
+
+            matched = query in file_text or query in dst_text or query in reason_text
+            self.table.setRowHidden(row, not matched)
+
+    def _show_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+
+        row = item.row()
+        src_path_item = self.table.item(row, 4)
+        if not src_path_item:
+            return
+
+        src_path = src_path_item.text()
+        menu = QMenu(self)
+
+        reveal_action = QAction("📂 Reveal in File Explorer", self)
+        reveal_action.triggered.connect(lambda: self._reveal_in_explorer(src_path))
+        menu.addAction(reveal_action)
+
+        open_action = QAction("📄 Open File", self)
+        open_action.triggered.connect(lambda: self._open_file(src_path))
+        menu.addAction(open_action)
+
+        menu.addSeparator()
+
+        chk_item = self.table.item(row, 0)
+        if chk_item and chk_item.checkState() == Qt.CheckState.Checked:
+            toggle_action = QAction("❌ Exclude from Organization", self)
+            toggle_action.triggered.connect(lambda: chk_item.setCheckState(Qt.CheckState.Unchecked))
+        else:
+            toggle_action = QAction("✅ Include in Organization", self)
+            toggle_action.triggered.connect(lambda: chk_item.setCheckState(Qt.CheckState.Checked))
+        menu.addAction(toggle_action)
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _reveal_in_explorer(self, file_path: str):
+        p = Path(file_path)
+        if p.exists():
+            subprocess.Popen(f'explorer /select,"{p.resolve()}"')
+
+    def _open_file(self, file_path: str):
+        p = Path(file_path)
+        if p.exists():
+            os.startfile(str(p.resolve()))
 
     def generate_plan(self, is_rule_based: bool = False):
         folder = self.src_edit.text().strip()
@@ -247,7 +347,7 @@ class AIOrganizeTab(QWidget):
         self.progress_bar.show()
 
         instruction = "__rule_based__" if is_rule_based else self.instruction_edit.text().strip()
-        method_name = "Rule-based organizer" if is_rule_based else "Ollama AI"
+        method_name = "Rule-based organizer" if is_rule_based else "Local AI (Qwen / Llama)"
         self.status_label.setText(f"Analyzing files with {method_name}...")
 
         p = Path(folder)
@@ -280,19 +380,25 @@ class AIOrganizeTab(QWidget):
         for i, m in enumerate(moves):
             src_p = Path(m.src)
 
+            # Checkbox
             chk_item = QTableWidgetItem()
             chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
             chk_item.setCheckState(Qt.CheckState.Checked)
 
+            # File name
             file_item = QTableWidgetItem(src_p.name)
             file_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
+            # Editable Destination
             dst_item = QTableWidgetItem(m.dst)
-            dst_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            dst_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable)
+            dst_item.setToolTip("Double-click to manually customize destination path before applying")
 
+            # AI Reason
             reason_item = QTableWidgetItem(m.reason)
             reason_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
+            # Source Path
             src_item = QTableWidgetItem(m.src)
             src_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
@@ -304,8 +410,9 @@ class AIOrganizeTab(QWidget):
 
         total = len(moves)
         self.count_label.setText(f"{total} proposed move(s).")
-        self.status_label.setText(f"Preview ready: {total} files planned.")
+        self.status_label.setText(f"Preview ready: {total} files planned. Double-click any destination cell to customize.")
         self.apply_btn.setEnabled(total > 0)
+        self._on_filter_changed(self.filter_edit.text())
 
     def _plan_failed(self, err: str):
         self.progress_bar.hide()
@@ -326,18 +433,31 @@ class AIOrganizeTab(QWidget):
         for row in range(self.table.rowCount()):
             chk = self.table.item(row, 0)
             if chk and chk.checkState() == Qt.CheckState.Checked:
-                if row < len(self.current_moves):
-                    selected_moves.append(self.current_moves[row])
+                src_item = self.table.item(row, 4)
+                dst_item = self.table.item(row, 2)
+                reason_item = self.table.item(row, 3)
+
+                if src_item and dst_item:
+                    # Read the destination cell value (handles manual user edits!)
+                    selected_moves.append(Move(
+                        src=src_item.text().strip(),
+                        dst=dst_item.text().strip(),
+                        reason=reason_item.text().strip() if reason_item else "",
+                    ))
 
         if not selected_moves:
             QMessageBox.information(self, "No Selection", "Please check at least one move to apply.")
             return
 
+        mode = "copy" if self.copy_radio.isChecked() else "move"
+        verb = "Copy" if mode == "copy" else "Move"
+
         confirm = QMessageBox.question(
             self,
-            "Confirm Organization",
-            f"Move {len(selected_moves)} file(s)?\n\n"
-            "This operation will organize files safely and can be undone at any time.",
+            f"Confirm {verb}",
+            f"{verb} {len(selected_moves)} file(s)?\n\n"
+            f"Mode: {'Duplicate without deleting originals' if mode == 'copy' else 'Relocate to organized subfolders'}.\n"
+            "This operation can be completely undone at any time.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
@@ -347,22 +467,23 @@ class AIOrganizeTab(QWidget):
         self.ai_plan_btn.setEnabled(False)
         self.fast_plan_btn.setEnabled(False)
         self.progress_bar.show()
-        self.status_label.setText(f"Applying {len(selected_moves)} moves...")
+        self.status_label.setText(f"Applying {len(selected_moves)} operations ({mode})...")
 
-        self.apply_worker = ApplyWorker(self.settings.db_path, selected_moves)
+        self.apply_worker = ApplyWorker(self.settings.db_path, selected_moves, mode=mode)
         self.apply_worker.done.connect(self._apply_done)
         self.apply_worker.failed.connect(self._apply_failed)
         self.apply_worker.start()
 
-    def _apply_done(self, batch_id: str, count: int):
+    def _apply_done(self, batch_id: str, count: int, mode: str):
         self.progress_bar.hide()
         self.ai_plan_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
-        self.status_label.setText(f"Done! Moved {count} file(s). Batch ID: {batch_id}")
+        action_name = "copied" if mode == "copy" else "moved"
+        self.status_label.setText(f"Done! Successfully {action_name} {count} file(s). Batch ID: {batch_id}")
         QMessageBox.information(
             self,
-            "Moves Applied",
-            f"Successfully organized {count} file(s)!\nBatch ID: {batch_id}\n\n"
+            "Operations Applied",
+            f"Successfully {action_name} {count} file(s)!\nBatch ID: {batch_id}\n\n"
             "You can undo this batch at any time using the History & Undo section.",
         )
         self.refresh_history()
@@ -373,7 +494,7 @@ class AIOrganizeTab(QWidget):
         self.ai_plan_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
         self.apply_btn.setEnabled(True)
-        self.status_label.setText(f"Apply failed: {err}")
+        self.status_label.setText(f"Operation failed: {err}")
         QMessageBox.critical(self, "Error", f"Failed to apply moves: {err}")
 
     def refresh_history(self):
@@ -381,7 +502,7 @@ class AIOrganizeTab(QWidget):
         try:
             conn = connect(self.settings.db_path)
             rows = conn.execute(
-                "SELECT batch_id, created_at, COUNT(*) as cnt "
+                "SELECT batch_id, action, created_at, COUNT(*) as cnt "
                 "FROM operations WHERE status='done' "
                 "GROUP BY batch_id ORDER BY id DESC LIMIT 25"
             ).fetchall()
@@ -393,7 +514,8 @@ class AIOrganizeTab(QWidget):
                 return
 
             for r in rows:
-                label = f"Batch {r['batch_id']} ({r['cnt']} files) - {r['created_at']}"
+                action_tag = r["action"].upper()
+                label = f"[{action_tag}] Batch {r['batch_id']} ({r['cnt']} files) - {r['created_at']}"
                 self.batch_combo.addItem(label, r["batch_id"])
 
             self.undo_btn.setEnabled(True)

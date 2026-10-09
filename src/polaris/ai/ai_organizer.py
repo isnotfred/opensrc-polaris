@@ -1,4 +1,4 @@
-"""AI-powered file organizer with CPU-optimized prompting and JSON parsing."""
+"""AI-powered file organizer with content-aware snippet inspection and CPU-optimized prompting."""
 from __future__ import annotations
 
 import json
@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 from ..config import Settings
+from ..core.extractor import extract_text_from_file
 from ..core.organizer import Move, plan_by_type, unique_destination
 from .ollama_client import chat
 from .planner_schema import parse_model_json
@@ -18,23 +19,40 @@ def plan_with_ai(
     settings: Settings | None = None,
 ) -> list[Move]:
     """
-    Uses Ollama to categorize files with compact prompts and CPU-friendly token budgets.
+    Uses Ollama to categorize files with compact prompts, content snippets, and CPU-friendly token budgets.
     """
     settings = settings or Settings()
     root = Path(dest_root)
-    file_names = [Path(p).name for p in file_paths]
 
-    if not file_names:
+    if not file_paths:
         return []
 
-    # Use batches of 25 for quick CPU generation
-    batch_size = 25
+    # Process in batches of 20 for responsive CPU inference
+    batch_size = 20
     all_moves: list[Move] = []
     reserved_destinations: set[str] = set()
 
     for i in range(0, len(file_paths), batch_size):
         batch_paths = file_paths[i:i + batch_size]
-        batch_names = [Path(p).name for p in batch_paths]
+        items_payload = []
+
+        # Content-aware inspection: grab first 120 chars for documents/text files
+        for p_str in batch_paths:
+            p = Path(p_str)
+            item_info: dict[str, str] = {"filename": p.name}
+            ext = p.suffix.lower()
+
+            if ext in (".pdf", ".docx", ".doc", ".txt", ".md", ".py", ".json", ".csv", ".html", ".js", ".ts"):
+                try:
+                    pages = extract_text_from_file(p)
+                    if pages and pages[0][1].strip():
+                        # Clean whitespace and truncate
+                        clean_snip = " ".join(pages[0][1].split())[:120]
+                        item_info["snippet"] = clean_snip
+                except Exception:
+                    pass
+
+            items_payload.append(item_info)
 
         if user_instruction.strip():
             instruction_text = f"USER RULE: {user_instruction.strip()}"
@@ -42,9 +60,9 @@ def plan_with_ai(
             instruction_text = "RULE: Group into concise subfolders by topic, date, or type (e.g. Documents, Invoices, Photos, Code)."
 
         prompt = (
-            f"Organize these files into clean subfolders.\n"
+            f"Organize these files into clean subfolders using their filenames and snippets.\n"
             f"{instruction_text}\n\n"
-            f"FILES:\n{json.dumps(batch_names)}\n\n"
+            f"FILES:\n{json.dumps(items_payload)}\n\n"
             f'Output ONLY JSON:\n{{"moves": [{{"filename": "name.ext", "folder": "Subfolder", "reason": "short why"}}]}}'
         )
 

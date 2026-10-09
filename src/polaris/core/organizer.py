@@ -1,5 +1,6 @@
-"""Rule-based organization with preview, conflict-safe apply, and undo."""
+"""Rule-based organization with preview, conflict-safe apply (move/copy), and undo."""
 from __future__ import annotations
+
 import shutil
 import sqlite3
 import uuid
@@ -54,9 +55,14 @@ def plan_by_type(file_paths: list[str], dest_root: str) -> list[Move]:
     return moves
 
 
-def apply_moves(conn: sqlite3.Connection, moves: list[Move]) -> str:
-    """Execute approved moves. Records every operation. Returns batch_id."""
+def apply_moves(conn: sqlite3.Connection, moves: list[Move], mode: str = "move") -> str:
+    """
+    Execute approved file operations (mode='move' or 'copy').
+    Records every operation in SQLite. Returns batch_id.
+    """
     batch = uuid.uuid4().hex[:12]
+    action_type = "copy" if mode == "copy" else "move"
+
     for m in moves:
         src, dst = Path(m.src), Path(m.dst)
         try:
@@ -64,28 +70,53 @@ def apply_moves(conn: sqlite3.Connection, moves: list[Move]) -> str:
                 raise FileNotFoundError("source missing")
             dst = unique_destination(dst)  # re-check at execution time
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-            conn.execute("INSERT INTO operations(batch_id,action,src,dst,status) VALUES(?,?,?,?,?)",
-                         (batch, "move", str(src), str(dst), "done"))
+
+            if action_type == "copy":
+                shutil.copy2(str(src), str(dst))
+            else:
+                shutil.move(str(src), str(dst))
+
+            conn.execute(
+                "INSERT INTO operations(batch_id,action,src,dst,status) VALUES(?,?,?,?,?)",
+                (batch, action_type, str(src), str(dst), "done"),
+            )
         except OSError as e:
-            conn.execute("INSERT INTO operations(batch_id,action,src,dst,status,error) VALUES(?,?,?,?,?,?)",
-                         (batch, "move", str(src), str(dst), "failed", str(e)))
+            conn.execute(
+                "INSERT INTO operations(batch_id,action,src,dst,status,error) VALUES(?,?,?,?,?,?)",
+                (batch, action_type, str(src), str(dst), "failed", str(e)),
+            )
     conn.commit()
     return batch
 
 
 def undo_batch(conn: sqlite3.Connection, batch_id: str) -> tuple[int, int]:
-    """Reverse a batch (last move first). Returns (restored, failed)."""
-    rows = conn.execute("SELECT id,src,dst FROM operations WHERE batch_id=? AND status='done' "
-                        "ORDER BY id DESC", (batch_id,)).fetchall()
+    """
+    Reverse an operation batch (last operation first).
+    For moves: restores file back to src.
+    For copies: removes the copied file at dst.
+    Returns (restored, failed).
+    """
+    rows = conn.execute(
+        "SELECT id,action,src,dst FROM operations WHERE batch_id=? AND status='done' "
+        "ORDER BY id DESC",
+        (batch_id,),
+    ).fetchall()
     ok = bad = 0
     for r in rows:
+        action = r["action"]
         src, dst = Path(r["src"]), Path(r["dst"])
         try:
-            if not dst.exists() or src.exists():
-                raise FileExistsError("cannot restore safely")
-            src.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dst), str(src))
+            if action == "copy":
+                # For copy, undo means deleting the copied file
+                if dst.exists():
+                    dst.unlink()
+            else:
+                # For move, undo means restoring to original location
+                if not dst.exists() or src.exists():
+                    raise FileExistsError("cannot restore safely")
+                src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dst), str(src))
+
             conn.execute("UPDATE operations SET status='undone' WHERE id=?", (r["id"],))
             ok += 1
         except OSError as e:
