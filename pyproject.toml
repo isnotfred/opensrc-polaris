@@ -23,3 +23,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.pyrefly]
+python-interpreter = ".venv/Scripts/python.exe"
+

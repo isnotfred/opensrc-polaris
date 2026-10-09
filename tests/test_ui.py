@@ -74,3 +74,49 @@ def test_summarize_tab_init(qapp, tmp_path):
     tab = SummarizeTab(settings)
     assert tab.preset_combo.count() == 3
     assert tab.summary_viewer is not None
+    assert tab.mode_combo.count() == 3
+    assert tab.input_stack.count() == 2
+
+
+def test_summarize_tab_mode_switching(qapp, tmp_path):
+    settings = Settings(data_dir=tmp_path)
+    tab = SummarizeTab(settings)
+
+    # Default is summary
+    assert tab.mode_combo.currentData() == "summary"
+    assert tab.input_stack.currentIndex() == 0
+    assert not tab.single_opts_widget.isHidden()
+    assert "Summarize" in tab.run_btn.text()
+
+    # Switch to entity mode
+    tab.mode_combo.setCurrentIndex(1)
+    assert tab.mode_combo.currentData() == "entity"
+    assert tab.input_stack.currentIndex() == 0
+    assert tab.single_opts_widget.isHidden()
+    assert "Extract" in tab.run_btn.text()
+
+    # Switch to multidoc mode
+    tab.mode_combo.setCurrentIndex(2)
+    assert tab.mode_combo.currentData() == "multidoc"
+    assert tab.input_stack.currentIndex() == 1
+    assert "Compare" in tab.run_btn.text()
+
+
+def test_summarize_tab_entity_json_parsing(qapp, tmp_path):
+    settings = Settings(data_dir=tmp_path)
+    tab = SummarizeTab(settings)
+
+    sample_json = (
+        '{"action_items": ["Deploy v2"], '
+        '"deadlines": ["Nov 1"], '
+        '"financial_figures": ["$10,000"], '
+        '"key_entities": ["Polaris"]}'
+    )
+    tab._on_entity_done(sample_json)
+
+    assert "Deploy v2" in tab.summary_viewer.toHtml()
+    assert "Nov 1" in tab.summary_viewer.toHtml()
+    assert "$10,000" in tab.summary_viewer.toHtml()
+    assert "Polaris" in tab.summary_viewer.toHtml()
+    assert tab.save_btn.isEnabled()
+
