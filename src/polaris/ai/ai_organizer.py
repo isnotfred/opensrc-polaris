@@ -60,24 +60,32 @@ def plan_with_ai(
         else:
             instruction_text = "RULE: Group into concise subfolders by topic, date, or type (e.g. Documents, Invoices, Photos, Code)."
 
+        # Few-shot example teaches the model the exact output shape to use.
+        few_shot = '{"moves": [{"filename": "report_q3.pdf", "folder": "Finance", "reason": "quarterly report"}]}'
         prompt = (
             f"Organize these files into clean subfolders using their filenames and snippets.\n"
             f"{instruction_text}\n\n"
             f"FILES:\n{json.dumps(items_payload)}\n\n"
-            f'Output ONLY JSON:\n{{"moves": [{{"filename": "name.ext", "folder": "Subfolder", "reason": "short why"}}]}}'
+            f"Output ONLY a JSON object in exactly this shape (do NOT output a bare array):\n"
+            f"{few_shot}"
         )
 
         try:
             resp_text = chat(
                 settings,
                 [
-                    {"role": "system", "content": "You are a fast JSON-only file classifier. Be concise."},
+                    {"role": "system", "content": "You are a fast JSON-only file classifier. Output a JSON object with a 'moves' key. Be concise."},
                     {"role": "user", "content": prompt}
                 ],
-                options={"num_predict": 350, "num_ctx": 2048, "temperature": 0.1}
+                options={"num_predict": 400, "num_ctx": 2048, "temperature": 0.1}
             )
             parsed = parse_model_json(resp_text)
-            moves_data = parsed.get("moves", [])
+
+            # Handle both {"moves": [...]} and a bare list (model sometimes ignores the wrapper)
+            if isinstance(parsed, list):
+                moves_data = parsed
+            else:
+                moves_data = parsed.get("moves", [])
 
             path_map = {Path(p).name: p for p in batch_paths}
             handled_names = set()
