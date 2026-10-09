@@ -150,19 +150,31 @@ def suggest_single_file_placement(
             pass
 
     # --- Build prompt ---------------------------------------------------------
-    prompt = (
-        f"A user just downloaded or saved this file:\n"
-        f"Original Name: {p.name}\n"
+    # Use a few-shot example so small models don't echo the placeholder.
+    # The example uses a completely different filename + folder so the model
+    # learns the *pattern*, not the specific values.
+    few_shot_example = (
+        '{"suggested_filename": "quarterly_sales_report_q3.pdf", '
+        '"suggested_folder": "Documents/Reports", '
+        '"reason": "Financial report grouped with other reports"}'
     )
-    if snippet:
-        prompt += f"Document Content Preview: {snippet}\n"
 
-    prompt += (
-        "\nProvide a clean standardized filename (keep the same extension) and a logical subfolder "
-        "(e.g. Documents/Invoices, Photos/2024, Software/Code, etc.).\n"
-        "Output ONLY JSON in this format:\n"
-        '{"suggested_filename": "clean_name.ext", "suggested_folder": "Documents/Invoices", "reason": "why"}'
-    )
+    prompt_lines = [
+        f"File detected: {p.name}",
+    ]
+    if snippet:
+        prompt_lines.append(f"Content preview: {snippet}")
+
+    prompt_lines += [
+        "",
+        "Suggest a clean, descriptive filename for this specific file (keep the same extension)"
+        " and the best subfolder to save it in (e.g. Documents/Reports, Photos/2024,"
+        " Software/Installers, Work/Reviews, etc.).",
+        "Output ONLY a JSON object. Do NOT use placeholder values.",
+        f"Example output for a different file: {few_shot_example}",
+        "Now output JSON for the file above:",
+    ]
+    prompt = "\n".join(prompt_lines)
 
     # --- Call Ollama with a hard timeout so we never hang --------------------
     result: dict = {}
@@ -173,15 +185,34 @@ def suggest_single_file_placement(
             resp = chat(
                 settings,
                 [
-                    {"role": "system", "content": "You are an intelligent desktop file organizer. Output JSON only."},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an intelligent desktop file organizer. "
+                            "Always output valid JSON only. "
+                            "Never copy placeholder values like 'clean_name' — "
+                            "always use the actual filename provided by the user."
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
-                options={"num_predict": 250, "num_ctx": 2048, "temperature": 0.1},
+                options={"num_predict": 150, "num_ctx": 2048, "temperature": 0.15},
             )
             parsed = parse_model_json(resp)
-            new_name = parsed.get("suggested_filename", p.name).strip()
-            folder = parsed.get("suggested_folder", "Organized").strip("/\\ ")
+            new_name = parsed.get("suggested_filename", "").strip()
+            folder = parsed.get("suggested_folder", "").strip("/\\ ")
             reason = parsed.get("reason", "Smart auto-placement").strip()
+
+            # --- Sanity checks -----------------------------------------------
+            # Reject literal placeholder names that small models sometimes echo
+            _bad_stems = {"clean_name", "filename", "name", "file", "example"}
+            if not new_name or Path(new_name).stem.lower() in _bad_stems:
+                new_name = p.name  # Fall back to original
+
+            # Reject placeholder folders
+            if not folder or folder.lower() in {"subfolder", "folder", "path"}:
+                from ..core.organizer import category_for
+                folder = category_for(p.suffix)
 
             # Ensure extension isn't dropped by the model
             if not Path(new_name).suffix and p.suffix:
