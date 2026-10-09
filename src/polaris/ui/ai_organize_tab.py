@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -27,16 +27,37 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Settings
-from ..core.organizer import Move, apply_moves, plan_by_type, undo_batch
+from ..core.organizer import ApplyResult, Move, apply_moves, plan_by_type, undo_batch
 from ..core.watcher import DownloadWatcherWorker
 from ..ai.ai_organizer import plan_with_ai, suggest_single_file_placement
 from ..db.database import connect
 from .suggestion_toast import SuggestionToast
 
 
+def _friendly_timestamp(ts: str) -> str:
+    """Convert a SQLite CURRENT_TIMESTAMP string to a human-readable label."""
+    import datetime
+    try:
+        dt = datetime.datetime.fromisoformat(ts)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        diff = (now.date() - dt.date()).days
+        time_str = dt.strftime("%I:%M %p").lstrip("0")
+        if diff == 0:
+            return f"Today {time_str}"
+        elif diff == 1:
+            return f"Yesterday {time_str}"
+        elif diff < 7:
+            return f"{dt.strftime('%A')} {time_str}"
+        else:
+            return dt.strftime("%b %d, %Y")
+    except Exception:
+        return ts  # fall back to raw string if parsing fails
+
+
 class AIPlanWorker(QThread):
     done = Signal(list)
     failed = Signal(str)
+    progress = Signal(int, int)  # current_batch, total_batches
 
     def __init__(self, file_paths: list[str], dest_dir: str, instruction: str, settings: Settings):
         super().__init__()
@@ -50,14 +71,17 @@ class AIPlanWorker(QThread):
             if self.instruction.strip().lower() == "__rule_based__":
                 moves = plan_by_type(self.file_paths, self.dest_dir)
             else:
-                moves = plan_with_ai(self.file_paths, self.dest_dir, self.instruction, self.settings)
+                moves = plan_with_ai(
+                    self.file_paths, self.dest_dir, self.instruction, self.settings,
+                    progress_callback=lambda cur, tot: self.progress.emit(cur, tot),
+                )
             self.done.emit(moves)
         except Exception as e:
             self.failed.emit(str(e))
 
 
 class ApplyWorker(QThread):
-    done = Signal(str, int, str)  # batch_id, count, mode
+    done = Signal(str, int, int, str)  # batch_id, succeeded, failed, mode
     failed = Signal(str)
 
     def __init__(self, db_path: Path, moves: list[Move], mode: str = "move"):
@@ -69,9 +93,9 @@ class ApplyWorker(QThread):
     def run(self):
         try:
             conn = connect(self.db_path)
-            batch_id = apply_moves(conn, self.moves, mode=self.mode)
+            result = apply_moves(conn, self.moves, mode=self.mode)
             conn.close()
-            self.done.emit(batch_id, len(self.moves), self.mode)
+            self.done.emit(result.batch_id, result.succeeded, result.failed, self.mode)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -131,8 +155,9 @@ class AIOrganizeTab(QWidget):
         self.setAcceptDrops(True)
         self._init_ui()
         self.refresh_history()
-        # Auto-start the watcher so users get toasts immediately on launch
-        self._toggle_watcher()
+        # Defer watcher auto-start until after the main window is fully shown
+        # (avoids QMessageBox popping up before the window renders)
+        QTimer.singleShot(600, lambda: self._toggle_watcher(silent=True))
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -315,11 +340,12 @@ class AIOrganizeTab(QWidget):
         layout.addWidget(history_group)
 
     # Background Watcher Controls
-    def _toggle_watcher(self):
+    def _toggle_watcher(self, silent: bool = False):
         if self.watcher and self.watcher.isRunning():
             self.watcher.stop()
             self.watcher.wait()
             self.watcher = None
+            self.analyze_workers = [w for w in self.analyze_workers if w.isRunning()]
             self.toggle_watcher_btn.setText("▶ Start Live Watcher")
             self.toggle_watcher_btn.setStyleSheet("font-weight: bold; padding: 4px 12px;")
             self.watcher_status.setText(f"Folder: {self.watch_folder} (Inactive)")
@@ -327,7 +353,11 @@ class AIOrganizeTab(QWidget):
         else:
             p = Path(self.watch_folder)
             if not p.is_dir():
-                QMessageBox.warning(self, "Folder Not Found", f"Cannot watch {self.watch_folder}: folder does not exist.")
+                if silent:
+                    self.watcher_status.setText(f"Folder: {self.watch_folder} (Not found)")
+                    self.watcher_status.setStyleSheet("color: #f87171; font-size: 12px;")
+                else:
+                    QMessageBox.warning(self, "Folder Not Found", f"Cannot watch {self.watch_folder}: folder does not exist.")
                 return
 
             self._session_file_count = 0
@@ -480,7 +510,7 @@ class AIOrganizeTab(QWidget):
 
         instruction = "__rule_based__" if is_rule_based else self.instruction_edit.text().strip()
         method_name = "Rule-based organizer" if is_rule_based else "Local AI (Qwen / Llama)"
-        self.status_label.setText(f"Analyzing files with {method_name}...")
+        self.status_label.setText(f"Scanning files for {method_name}...")
 
         p = Path(folder)
         if self.subfolders_check.isChecked():
@@ -500,7 +530,11 @@ class AIOrganizeTab(QWidget):
         self.plan_worker = AIPlanWorker(files, folder, instruction, self.settings)
         self.plan_worker.done.connect(self._show_preview)
         self.plan_worker.failed.connect(self._plan_failed)
+        self.plan_worker.progress.connect(self._on_plan_progress)
         self.plan_worker.start()
+
+    def _on_plan_progress(self, current: int, total: int):
+        self.status_label.setText(f"AI planning batch {current} of {total}…")
 
     def _show_preview(self, moves: list[Move]):
         self.progress_bar.hide()
@@ -605,18 +639,20 @@ class AIOrganizeTab(QWidget):
         self.apply_worker.failed.connect(self._apply_failed)
         self.apply_worker.start()
 
-    def _apply_done(self, batch_id: str, count: int, mode: str):
+    def _apply_done(self, batch_id: str, succeeded: int, failed: int, mode: str):
         self.progress_bar.hide()
         self.ai_plan_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
         action_name = "copied" if mode == "copy" else "moved"
-        self.status_label.setText(f"Done! Successfully {action_name} {count} file(s). Batch ID: {batch_id}")
-        QMessageBox.information(
-            self,
-            "Operations Applied",
-            f"Successfully {action_name} {count} file(s)!\nBatch ID: {batch_id}\n\n"
-            "You can undo this batch at any time using the History & Undo section.",
-        )
+        status = f"Done! {action_name.capitalize()} {succeeded} file(s). Batch: {batch_id[:8]}"
+        if failed:
+            status += f"  ({failed} failed)"
+        self.status_label.setText(status)
+        detail = f"Successfully {action_name} {succeeded} file(s)!"
+        if failed:
+            detail += f"\n⚠️ {failed} file(s) could not be {action_name} (check permissions)."
+        detail += f"\nBatch ID: {batch_id}\n\nYou can undo this batch at any time."
+        QMessageBox.information(self, "Operations Applied", detail)
         self.refresh_history()
         # Only re-plan if the user still has a folder selected
         if self.src_edit.text().strip():
@@ -648,7 +684,9 @@ class AIOrganizeTab(QWidget):
 
             for r in rows:
                 action_tag = r["action"].upper()
-                label = f"[{action_tag}] Batch {r['batch_id']} ({r['cnt']} files) - {r['created_at']}"
+                bid_short = r["batch_id"][:8]
+                ts = _friendly_timestamp(r["created_at"])
+                label = f"[{action_tag}] {bid_short}… · {r['cnt']} file(s) · {ts}"
                 self.batch_combo.addItem(label, r["batch_id"])
 
             self.undo_btn.setEnabled(True)

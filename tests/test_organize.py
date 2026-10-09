@@ -47,12 +47,14 @@ def test_copy_mode_and_undo(tmp_path):
     moves = [Move(src=str(f1), dst=str(dst_dir / "report.pdf"), reason="copy test")]
 
     # Apply in copy mode
-    batch_id = apply_moves(conn, moves, mode="copy")
+    result = apply_moves(conn, moves, mode="copy")
+    assert result.succeeded == 1
+    assert result.failed == 0
     assert f1.exists()  # Source remains intact
     assert (dst_dir / "report.pdf").exists()  # Copy created
 
     # Undo copy mode: should delete the copied file and keep original
-    restored, failed = undo_batch(conn, batch_id)
+    restored, failed = undo_batch(conn, result)
     assert restored == 1
     assert failed == 0
     assert not (dst_dir / "report.pdf").exists()
@@ -122,3 +124,29 @@ def test_suggestion_toast_apply(qapp, tmp_path):
     toast.apply_suggestion()
     assert not f.exists()  # Successfully moved
     assert (target_folder / "Renamed_Doc.pdf").exists()
+
+
+def test_suggest_single_file_includes_file_size(tmp_path):
+    f = tmp_path / "sample.pdf"
+    content = b"PDF data dummy content 12345"
+    f.write_bytes(content)
+    res = suggest_single_file_placement(f)
+    assert res.get("file_size_bytes") == len(content)
+
+
+def test_unique_destination_cap(tmp_path):
+    p = tmp_path / "doc.txt"
+    p.write_text("orig")
+    # Simulate reserved set containing many collisions
+    reserved = {str(tmp_path / f"doc ({i}).txt") for i in range(1, 10)}
+    candidate = unique_destination(p, reserved)
+    assert candidate.name == "doc (10).txt"
+
+
+def test_friendly_timestamp_formatting():
+    from polaris.ui.ai_organize_tab import _friendly_timestamp
+    import datetime
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    formatted = _friendly_timestamp(now_str)
+    assert "Today" in formatted
+

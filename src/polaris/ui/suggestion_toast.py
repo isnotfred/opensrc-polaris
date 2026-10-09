@@ -33,6 +33,15 @@ _AUTO_DISMISS_SECS = 30
 _TOAST_STACK_OFFSET = 20
 
 
+def _fmt_size(n: int) -> str:
+    """Human-readable file size string."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 class SuggestionToast(QWidget):
     applied = Signal(str, str)   # src, dst
     dismissed = Signal()
@@ -133,8 +142,10 @@ class SuggestionToast(QWidget):
         self.countdown_bar.setValue(_AUTO_DISMISS_SECS)
         layout.addWidget(self.countdown_bar)
 
-        # Original file info
-        orig_label = QLabel(f"Detected: <b>{self.orig_path.name}</b>")
+        # Original file info + size
+        size_bytes = self.suggestion.get("file_size_bytes", 0)
+        size_str = f"  ·  {_fmt_size(size_bytes)}" if size_bytes else ""
+        orig_label = QLabel(f"Detected: <b>{self.orig_path.name}</b>{size_str}")
         orig_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
         layout.addWidget(orig_label)
 

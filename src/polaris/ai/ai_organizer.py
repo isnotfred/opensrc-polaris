@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
-from typing import List
+from typing import Callable, List
 
 from ..config import Settings
 from ..core.extractor import extract_text_from_file
@@ -12,15 +13,21 @@ from ..core.organizer import Move, plan_by_type, unique_destination
 from .ollama_client import chat
 from .planner_schema import parse_model_json
 
+logger = logging.getLogger(__name__)
+
 
 def plan_with_ai(
     file_paths: list[str],
     dest_root: str,
     user_instruction: str = "",
     settings: Settings | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[Move]:
     """
     Uses Ollama to categorize files with compact prompts, content snippets, and CPU-friendly token budgets.
+
+    Args:
+        progress_callback: optional callable(current_batch, total_batches) called before each batch.
     """
     settings = settings or Settings()
     root = Path(dest_root)
@@ -30,10 +37,13 @@ def plan_with_ai(
 
     # Process in batches of 20 for responsive CPU inference
     batch_size = 20
+    total_batches = max(1, (len(file_paths) + batch_size - 1) // batch_size)
     all_moves: list[Move] = []
     reserved_destinations: set[str] = set()
 
-    for i in range(0, len(file_paths), batch_size):
+    for batch_num, i in enumerate(range(0, len(file_paths), batch_size), start=1):
+        if progress_callback:
+            progress_callback(batch_num, total_batches)
         batch_paths = file_paths[i:i + batch_size]
         items_payload = []
 
@@ -112,7 +122,11 @@ def plan_with_ai(
                     reserved_destinations.add(str(dst))
                     all_moves.append(Move(src=rm.src, dst=str(dst), reason=f"Fallback: {rm.reason}"))
 
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "plan_with_ai batch failed (falling back to rule-based): %s: %s",
+                type(exc).__name__, exc,
+            )
             fallback = plan_by_type(batch_paths, dest_root)
             for rm in fallback:
                 dst = unique_destination(Path(rm.dst), reserved_destinations)
@@ -145,6 +159,11 @@ def suggest_single_file_placement(
     p = Path(file_path)
     if not p.exists():
         return {}
+
+    try:
+        file_size_bytes = p.stat().st_size
+    except OSError:
+        file_size_bytes = 0
 
     # --- Build content snippet ------------------------------------------------
     snippet = ""
@@ -231,6 +250,7 @@ def suggest_single_file_placement(
                 "suggested_filename": new_name,
                 "suggested_folder": folder,
                 "reason": reason,
+                "file_size_bytes": file_size_bytes,
             })
         except Exception as e:  # noqa: BLE001
             exc_holder.append(e)
@@ -250,5 +270,6 @@ def suggest_single_file_placement(
         "suggested_filename": p.name,
         "suggested_folder": cat,
         "reason": f"Quick suggestion ({cat}) — AI response timed out or unavailable",
+        "file_size_bytes": file_size_bytes,
     }
 
