@@ -384,7 +384,7 @@ def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
     # PDF via PyMuPDF
     if ext == ".pdf":
         try:
-            import fitz
+            import pymupdf as fitz  # noqa: F401 — pymupdf is the modern API
             doc = fitz.open(str(path))
             pages = []
             for page_num in range(len(doc)):

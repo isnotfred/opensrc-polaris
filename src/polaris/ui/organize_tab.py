@@ -55,9 +55,9 @@ class ApplyWorker(QThread):
     def run(self):
         try:
             conn = connect(self.db_path)
-            batch_id = apply_moves(conn, self.moves)
+            result = apply_moves(conn, self.moves)
             conn.close()
-            self.done.emit(batch_id, len(self.moves))
+            self.done.emit(result.batch_id, result.succeeded)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -289,7 +289,15 @@ class OrganizeTab(QWidget):
         for row in range(self.table.rowCount()):
             chk = self.table.item(row, 0)
             if chk and chk.checkState() == Qt.CheckState.Checked:
-                if row < len(self.current_moves):
+                src_item = self.table.item(row, 3)
+                dst_item = self.table.item(row, 4)
+                if src_item and dst_item:
+                    selected_moves.append(Move(
+                        src=src_item.text().strip(),
+                        dst=dst_item.text().strip(),
+                        reason=f"{Path(src_item.text()).suffix} -> {Path(dst_item.text()).parent.name}",
+                    ))
+                elif row < len(self.current_moves):
                     selected_moves.append(self.current_moves[row])
 
         if not selected_moves:
