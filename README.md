@@ -1,6 +1,6 @@
-# SortPilot AI: Local-First Intelligent File Assistant
+# Polaris: Local-First Intelligent File Assistant
 
-SortPilot AI is a private, on-premise desktop assistant built with **PySide6** and powered 100% on-device by **Ollama**. No cloud calls, zero external API keys, and zero data leakage.
+Polaris is a private, on-premise desktop assistant built with **PySide6** and powered 100% on-device by **Ollama**. No cloud calls, zero external API keys, and zero data leakage.
 
 Designed to run smoothly on standard laptops and desktops (including CPU-only 8 GB RAM machines).
 
@@ -36,7 +36,7 @@ Designed to run smoothly on standard laptops and desktops (including CPU-only 8 
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# Install SortPilot with all dependencies
+# Install Polaris with all dependencies
 pip install -e ".[dev,docs,search]"
 ```
 
@@ -55,7 +55,9 @@ ollama pull llama3.2:3b
 
 ### 3. Launch Application
 ```powershell
-python -m sortpilot
+python -m polaris
+# or:
+polaris
 ```
 
 *(You can toggle between `qwen2.5:1.5b` and `llama3.2:3b` live via the **🧠 Model** dropdown in the top-right corner of the application window).*

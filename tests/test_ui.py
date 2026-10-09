@@ -6,12 +6,12 @@ from pathlib import Path
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from PySide6.QtWidgets import QApplication
-from sortpilot.config import Settings
-from sortpilot.ui.main_window import MainWindow
-from sortpilot.ui.ai_organize_tab import AIOrganizeTab
-from sortpilot.ui.chat_tab import ChatTab
-from sortpilot.ui.summarize_tab import SummarizeTab
-from sortpilot.core.extractor import extract_text_from_file, chunk_file, chunk_text
+from polaris.config import Settings
+from polaris.ui.main_window import MainWindow
+from polaris.ui.ai_organize_tab import AIOrganizeTab
+from polaris.ui.chat_tab import ChatTab
+from polaris.ui.summarize_tab import SummarizeTab
+from polaris.core.extractor import extract_text_from_file, chunk_file, chunk_text
 
 
 @pytest.fixture(scope="session")
@@ -54,7 +54,7 @@ def test_ai_organize_tab_flow(qapp, tmp_path):
     tab = AIOrganizeTab(settings)
     tab.src_edit.setText(str(in_dir))
 
-    from sortpilot.core.organizer import plan_by_type
+    from polaris.core.organizer import plan_by_type
     moves = plan_by_type([str(in_dir / "invoice_2024.pdf"), str(in_dir / "photo.png")], str(in_dir))
     tab._show_preview(moves)
 

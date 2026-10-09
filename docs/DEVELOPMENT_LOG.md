@@ -1,6 +1,6 @@
-# SortPilot AI: Development Log & Technical Summary
+# Polaris: Development Log & Technical Summary
 
-This document records the architectural decisions, bug fixes, features implemented, and hardware optimizations completed for SortPilot AI.
+This document records the architectural decisions, bug fixes, features implemented, and hardware optimizations completed for Polaris.
 
 ---
 

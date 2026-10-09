@@ -125,7 +125,7 @@ class RagEngine:
         ])
 
         system_prompt = (
-            "You are SortPilot AI. Answer the question accurately using ONLY the context below.\n"
+            "You are Polaris AI. Answer the question accurately using ONLY the context below.\n"
             "Cite sources like [filename, Page X]. If the answer isn't in the context, say so.\n"
             "Keep the answer concise and direct.\n\n"
             f"CONTEXT:\n{context_str}"

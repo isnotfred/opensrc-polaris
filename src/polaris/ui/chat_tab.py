@@ -122,7 +122,7 @@ class ChatTab(QWidget):
             "background-color: #0f172a; color: #f8fafc; font-family: Segoe UI, sans-serif; font-size: 13px; padding: 10px;"
         )
         self._append_system_msg(
-            "👋 Welcome to <b>SortPilot Document Chat</b>!<br>"
+            "👋 Welcome to <b>Polaris Document Chat</b>!<br>"
             "Index a folder above, then ask any question about your local files.<br>"
             "Responses stream in real-time with verified citations."
         )
@@ -204,7 +204,7 @@ class ChatTab(QWidget):
         self.chat_browser.append(
             '<div style="margin: 8px 0; text-align: left;">'
             '<div id="active_msg" style="background-color: #1e293b; color: #f8fafc; padding: 8px 14px; border-radius: 12px; display: inline-block; max-width: 90%; border: 1px solid #334155;">'
-            '<b>SortPilot:</b><br><span id="content">thinking...</span></div></div>'
+            '<b>Polaris:</b><br><span id="content">thinking...</span></div></div>'
         )
 
         self.query_worker = StreamQueryWorker(self.engine, query, self.history)
@@ -248,7 +248,7 @@ class ChatTab(QWidget):
         html = f"""
         <div style="margin: 8px 0; text-align: left;">
             <div style="background-color: #1e293b; color: #f8fafc; padding: 8px 14px; border-radius: 12px; display: inline-block; max-width: 90%; border: 1px solid #334155;">
-                <b>SortPilot:</b><br>{formatted_text}
+                <b>Polaris:</b><br>{formatted_text}
                 {citations_html}
             </div>
         </div>

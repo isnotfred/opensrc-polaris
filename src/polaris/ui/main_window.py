@@ -24,7 +24,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = Settings()
-        self.setWindowTitle("SortPilot AI - Local AI File Assistant")
+        self.setWindowTitle("Polaris - Local AI File Assistant")
         self.resize(1120, 720)
 
         # Central tab container

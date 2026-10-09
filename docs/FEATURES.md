@@ -1,12 +1,12 @@
-# SortPilot AI: Features & Capabilities Guide
+# Polaris: Features & Capabilities Guide
 
-SortPilot AI is a local-first, privacy-focused desktop assistant built with **PySide6** and powered 100% on-device by **Ollama**.
+Polaris is a local-first, privacy-focused desktop assistant built with **PySide6** and powered 100% on-device by **Ollama**.
 
 ---
 
 ## 1. 📁 AI-Powered File Organizing
 
-SortPilot organizes messy directories into structured folders using natural language instructions, while enforcing deterministic filesystem safeguards.
+Polaris organizes messy directories into structured folders using natural language instructions, while enforcing deterministic filesystem safeguards.
 
 ### Key Capabilities
 * **Natural Language File Grouping**:
@@ -49,7 +49,7 @@ A grounded desktop search and question-answering engine that lets you chat with 
   * Builds a local **FAISS `IndexFlatIP`** (inner product over normalized vectors for cosine similarity) in RAM.
   * Indexes dozens of files in just a few seconds.
 * **Grounded Retrieval-Augmented Generation (RAG)**:
-  * When you ask a question, SortPilot retrieves the top 3 most relevant chunks.
+  * When you ask a question, Polaris retrieves the top 3 most relevant chunks.
   * The LLM is instructed to answer strictly based on the provided context.
   * Source documents and page numbers are embedded in the answer (e.g., `📄 report.md (Page 1)`).
   * If the answer is not present in your files, the model explicitly states so rather than hallucinating.
@@ -82,7 +82,7 @@ An on-demand document analysis tool that generates crisp, structured summaries f
 
 ## 4. 🧠 Adaptive Model Architecture & CPU Optimizations
 
-SortPilot is engineered specifically to run efficiently on entry-level hardware (tested on an Intel 4-Core CPU with 8 GB RAM and integrated graphics).
+Polaris is engineered specifically to run efficiently on entry-level hardware (tested on an Intel 4-Core CPU with 8 GB RAM and integrated graphics).
 
 ### Optimization Techniques
 1. **Dynamic Model Switcher**:

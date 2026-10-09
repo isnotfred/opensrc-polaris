@@ -1,4 +1,4 @@
-# SortPilot AI: Local AI Assistant (Revised Scope)
+# Polaris: Local AI Assistant (Revised Scope)
 
 Focused local-first desktop file assistant powered 100% on your machine via **Ollama**. No cloud calls, zero data leakage.
 

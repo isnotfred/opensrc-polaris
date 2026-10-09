@@ -1,7 +1,7 @@
 MUTUAL NON-DISCLOSURE AGREEMENT (NDA)
 Effective Date: September 1, 2024
 Parties:
-1. SortPilot Technologies Inc. ("Disclosing Party")
+1. Polaris Technologies Inc. ("Disclosing Party")
 2. Quantum Ventures Capital LLC ("Receiving Party")
 
 1. PURPOSE
@@ -20,4 +20,4 @@ c) Not reverse-engineer or re-distribute any local inference weights or software
 This agreement shall remain in effect for a period of three (3) years from the Effective Date, expiring on September 1, 2027.
 
 Signatures:
-Elena Vance (SortPilot)              Marcus Sterling (Quantum Ventures)
+Elena Vance (Polaris)                Marcus Sterling (Quantum Ventures)

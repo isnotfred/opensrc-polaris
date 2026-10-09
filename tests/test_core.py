@@ -1,9 +1,9 @@
 from pathlib import Path
 import pytest
-from sortpilot.core.scanner import scan
-from sortpilot.core.organizer import plan_by_type, apply_moves, undo_batch
-from sortpilot.db.database import connect
-from sortpilot.ai.planner_schema import validate_plan, PlanError
+from polaris.core.scanner import scan
+from polaris.core.organizer import plan_by_type, apply_moves, undo_batch
+from polaris.db.database import connect
+from polaris.ai.planner_schema import validate_plan, PlanError
 
 
 def make(tmp_path):
