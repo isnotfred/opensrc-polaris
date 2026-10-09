@@ -1,24 +1,106 @@
-"""AI-Powered Search & Document Chatbot tab with real-time token streaming."""
+"""AI-Powered Search & Document Chatbot tab with real-time token streaming and hybrid search."""
 from __future__ import annotations
 
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
 from ..config import Settings
-from ..ai.rag import RagEngine
+from ..core.extractor import DocumentChunk
+from ..ai.rag import RagEngine, format_chat_export
+
+
+class SourceViewerDialog(QDialog):
+    """Interactive modal dialog displaying the exact retrieved snippets grounding the answer."""
+    def __init__(self, chunks: list[DocumentChunk], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.chunks = chunks
+        self.setWindowTitle("Polaris - Source Inspection & Citations")
+        self.resize(750, 480)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        header = QLabel(f"<b>Retrieved Context Sources ({len(self.chunks)} chunk(s))</b>")
+        header.setStyleSheet("font-size: 13px; color: #1e293b; margin-bottom: 4px;")
+        layout.addWidget(header)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left list of chunks
+        self.chunk_list = QListWidget()
+        for i, c in enumerate(self.chunks):
+            item = QListWidgetItem(f"📄 [{i + 1}] {c.file_name} (Page {c.page})")
+            self.chunk_list.addItem(item)
+        self.chunk_list.currentRowChanged.connect(self._on_chunk_selected)
+        splitter.addWidget(self.chunk_list)
+
+        # Right pane: details
+        right_panel = QWidget()
+        rp_layout = QVBoxLayout(right_panel)
+        rp_layout.setContentsMargins(4, 0, 0, 0)
+
+        self.meta_label = QLabel()
+        self.meta_label.setStyleSheet("color: #475569; font-size: 12px; margin-bottom: 6px;")
+        rp_layout.addWidget(self.meta_label)
+
+        self.text_preview = QTextBrowser()
+        self.text_preview.setStyleSheet(
+            "background-color: #0f172a; color: #f8fafc; font-family: Segoe UI, sans-serif; "
+            "font-size: 12px; border: 1px solid #334155; border-radius: 6px; padding: 8px;"
+        )
+        rp_layout.addWidget(self.text_preview, 1)
+
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("📋 Copy Snippet")
+        copy_btn.clicked.connect(self._copy_snippet)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(copy_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        rp_layout.addLayout(btn_row)
+
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+        if self.chunks:
+            self.chunk_list.setCurrentRow(0)
+
+    def _on_chunk_selected(self, row: int):
+        if 0 <= row < len(self.chunks):
+            c = self.chunks[row]
+            self.meta_label.setText(
+                f"<b>File:</b> {c.file_name} &nbsp;|&nbsp; <b>Page:</b> {c.page} &nbsp;|&nbsp; <b>Path:</b> <code>{c.doc_path}</code>"
+            )
+            self.text_preview.setPlainText(c.text)
+
+    def _copy_snippet(self):
+        row = self.chunk_list.currentRow()
+        if 0 <= row < len(self.chunks):
+            QGuiApplication.clipboard().setText(self.chunks[row].text)
+            QMessageBox.information(self, "Copied", "Source snippet copied to clipboard!")
 
 
 class IndexWorker(QThread):
@@ -47,15 +129,27 @@ class StreamQueryWorker(QThread):
     done = Signal(list)  # cited_chunks
     failed = Signal(str)
 
-    def __init__(self, engine: RagEngine, question: str, history: list[dict]):
+    def __init__(
+        self,
+        engine: RagEngine,
+        question: str,
+        history: list[dict],
+        file_types: list[str] | None = None,
+    ):
         super().__init__()
         self.engine = engine
         self.question = question
         self.history = history
+        self.file_types = file_types
 
     def run(self):
         try:
-            gen = self.engine.chat_with_docs_stream(self.question, self.history)
+            gen = self.engine.chat_with_docs_stream(
+                self.question,
+                self.history,
+                file_types=self.file_types,
+                hybrid=True,
+            )
             cited = []
             try:
                 while True:
@@ -74,6 +168,7 @@ class ChatTab(QWidget):
         self.settings = settings or Settings()
         self.engine = RagEngine(self.settings)
         self.history: list[dict] = []
+        self.last_cited_chunks: list[DocumentChunk] = []
         self.index_worker: IndexWorker | None = None
         self.query_worker: StreamQueryWorker | None = None
         self.current_assistant_text: str = ""
@@ -128,7 +223,30 @@ class ChatTab(QWidget):
         )
         cg_layout.addWidget(self.chat_browser, 1)
 
-        # 3. Input
+        # 3. Filter and source inspection bar
+        filter_row = QHBoxLayout()
+        filter_label = QLabel("Search Scope:")
+        filter_label.setStyleSheet("font-size: 12px; color: #64748b; font-weight: bold;")
+        self.file_type_combo = QComboBox()
+        self.file_type_combo.addItems([
+            "All Supported Files",
+            "PDFs Only (*.pdf)",
+            "Documents & Notes (*.docx, *.txt, *.md, *.rst)",
+            "Source Code & Data (*.py, *.js, *.ts, *.json, *.csv, *.sql)",
+        ])
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.file_type_combo)
+        filter_row.addStretch()
+
+        self.inspect_sources_btn = QPushButton("🔎 Inspect Source Citations")
+        self.inspect_sources_btn.setEnabled(False)
+        self.inspect_sources_btn.setStyleSheet("font-size: 12px; padding: 3px 10px;")
+        self.inspect_sources_btn.clicked.connect(self.show_source_viewer)
+        filter_row.addWidget(self.inspect_sources_btn)
+
+        cg_layout.addLayout(filter_row)
+
+        # 4. Input row
         input_row = QHBoxLayout()
         self.query_edit = QLineEdit()
         self.query_edit.setPlaceholderText("Ask a question about your files... (e.g. 'What are the main findings in the report?')")
@@ -138,15 +256,61 @@ class ChatTab(QWidget):
         self.send_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 16px;")
         self.send_btn.clicked.connect(self.send_question)
 
+        export_btn = QPushButton("📥 Export Chat")
+        export_btn.clicked.connect(self.export_chat)
+
         clear_btn = QPushButton("Clear Chat")
         clear_btn.clicked.connect(self.clear_chat)
 
         input_row.addWidget(self.query_edit, 1)
         input_row.addWidget(self.send_btn)
+        input_row.addWidget(export_btn)
         input_row.addWidget(clear_btn)
         cg_layout.addLayout(input_row)
 
         layout.addWidget(chat_group, 1)
+
+    def _get_selected_file_types(self) -> list[str] | None:
+        idx = self.file_type_combo.currentIndex()
+        if idx == 1:
+            return [".pdf"]
+        elif idx == 2:
+            return [".docx", ".doc", ".txt", ".md", ".rst"]
+        elif idx == 3:
+            return [
+                ".py", ".js", ".ts", ".html", ".css", ".json", ".csv",
+                ".xml", ".yaml", ".yml", ".toml", ".ini", ".sql"
+            ]
+        return None
+
+    def show_source_viewer(self):
+        if not self.last_cited_chunks:
+            QMessageBox.information(self, "No Citations", "No citations available to inspect.")
+            return
+        dialog = SourceViewerDialog(self.last_cited_chunks, self)
+        dialog.exec()
+
+    def export_chat(self):
+        if not self.history:
+            QMessageBox.information(self, "Export Chat", "No conversation history to export yet.")
+            return
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Chat Session",
+            "polaris_chat_export.md",
+            "Markdown Files (*.md);;Text Files (*.txt);;All Files (*.*)",
+        )
+        if not out_path:
+            return
+
+        try:
+            content = format_chat_export(self.history)
+            Path(out_path).write_text(content, encoding="utf-8")
+            self._append_system_msg(f"💾 Chat exported successfully to <code>{Path(out_path).name}</code>")
+            QMessageBox.information(self, "Export Successful", f"Chat saved to:\n{out_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to save chat export: {e}")
 
     def _browse_folder(self):
         f = QFileDialog.getExistingDirectory(self, "Select folder to index")
@@ -195,6 +359,7 @@ class ChatTab(QWidget):
 
         self.query_edit.clear()
         self._append_user_msg(query)
+        self.history.append({"role": "user", "content": query})
 
         self.send_btn.setEnabled(False)
         self.query_edit.setEnabled(False)
@@ -207,7 +372,8 @@ class ChatTab(QWidget):
             '<b>Polaris:</b><br><span id="content">thinking...</span></div></div>'
         )
 
-        self.query_worker = StreamQueryWorker(self.engine, query, self.history)
+        file_types = self._get_selected_file_types()
+        self.query_worker = StreamQueryWorker(self.engine, query, self.history, file_types=file_types)
         self.query_worker.token.connect(self._on_token)
         self.query_worker.done.connect(self._on_stream_done)
         self.query_worker.failed.connect(self._on_stream_failed)
@@ -232,7 +398,7 @@ class ChatTab(QWidget):
         if cited:
             unique_sources = {}
             for c in cited:
-                src_name = Path(c.doc_path).name
+                src_name = c.file_name
                 pages = unique_sources.setdefault(src_name, set())
                 pages.add(c.page)
 
@@ -267,11 +433,14 @@ class ChatTab(QWidget):
         self.query_edit.setEnabled(True)
         self.query_edit.setFocus()
 
+        self.last_cited_chunks = cited
+        if cited:
+            self.inspect_sources_btn.setEnabled(True)
+
         self._refresh_latest_assistant_bubble(self.current_assistant_text, cited=cited)
 
         # Update chat history
-        self.history.append({"role": "user", "content": self.history[-1]["content"] if self.history else ""})
-        self.history.append({"role": "assistant", "content": self.current_assistant_text})
+        self.history.append({"role": "assistant", "content": self.current_assistant_text, "cited": cited})
 
     def _on_stream_failed(self, err: str):
         self.send_btn.setEnabled(True)
@@ -298,5 +467,7 @@ class ChatTab(QWidget):
 
     def clear_chat(self):
         self.history.clear()
+        self.last_cited_chunks = []
+        self.inspect_sources_btn.setEnabled(False)
         self.chat_browser.clear()
         self._append_system_msg("Chat history cleared.")

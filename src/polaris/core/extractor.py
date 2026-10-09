@@ -13,6 +13,14 @@ class DocumentChunk:
     text: str
     chunk_index: int
 
+    @property
+    def file_name(self) -> str:
+        return Path(self.doc_path).name
+
+    @property
+    def extension(self) -> str:
+        return Path(self.doc_path).suffix.lower()
+
 
 def chunk_text(text: str, chunk_chars: int = 1200, overlap: int = 150) -> list[str]:
     """Splits text into overlapping character windows."""
@@ -71,8 +79,8 @@ def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
 
     # Text, Markdown, Code, CSV, JSON
     if ext in (
-        ".txt", ".md", ".py", ".js", ".ts", ".html", ".css", ".json",
-        ".csv", ".xml", ".yaml", ".yml", ".sql", ".sh", ".bat", ".ps1"
+        ".txt", ".md", ".rst", ".py", ".js", ".ts", ".html", ".css", ".json",
+        ".csv", ".xml", ".yaml", ".yml", ".toml", ".ini", ".sql", ".sh", ".bat", ".ps1"
     ):
         try:
             content = path.read_text(encoding="utf-8", errors="replace").strip()
