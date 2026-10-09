@@ -18,6 +18,7 @@ from polaris.core.extractor import (
     read_text_safe,
     compute_file_hash,
     find_line_range,
+    detect_text_document_section,
 )
 from polaris.ai.rag import (
     BM25Index,
@@ -32,6 +33,9 @@ from polaris.ai.rag import (
     rerank_chunks,
     deduplicate_chunks,
     assemble_prompt_context,
+    extract_substantive_query_terms,
+    SQLiteFTSIndex,
+    GENERIC_QUERY_TERMS,
     STOPWORDS,
 )
 from polaris.ui.chat_tab import (
@@ -1021,3 +1025,80 @@ Text after code.
     assert any("Actual Title" in s for s in sections)
     assert any("Real Subsection" in s for s in sections)
     assert not any("comment inside tilde" in s for s in sections)
+
+
+def test_extract_substantive_query_terms():
+    terms1 = extract_substantive_query_terms("Elaborate the report about the delta airlines")
+    assert terms1 == ["delta", "airlines"]
+
+    terms2 = extract_substantive_query_terms("Tell me about project apollo spec")
+    assert "project" in terms2
+    assert "apollo" in terms2
+
+    # Generic query fallback
+    terms3 = extract_substantive_query_terms("show all reports")
+    assert "show" in terms3 or "reports" in terms3
+
+
+def test_detect_text_document_section():
+    txt_receipt = """EXPENSE RECEIPT
+Merchant: Delta Air Lines
+Date: October 18, 2024
+Passenger: Alex Mercer
+Total Paid: $425.20
+"""
+    sec = detect_text_document_section(txt_receipt)
+    assert "Expense Receipt" in sec
+    assert "Delta Air Lines" in sec
+
+    txt_invoice = """INVOICE
+Billed To: Acme Corporation
+Amount Due: $1,200.00
+"""
+    sec_inv = detect_text_document_section(txt_invoice)
+    assert "Invoice" in sec_inv
+    assert "Acme Corporation" in sec_inv
+
+
+def test_entity_distractor_suppression_in_chat():
+    engine = RagEngine()
+    c_delta = DocumentChunk("receipt_delta.txt", 1, "Merchant: Delta Air Lines. Passenger Alex Mercer paid $425.20 for flight SEA to SFO.", 0, section="Expense Receipt - Delta Air Lines")
+    c_polaris = DocumentChunk("q3_report.md", 1, "Polaris Technologies, Inc. Q3 consolidated revenue was $4.2 million.", 1, section="Q3 Financial Performance Report")
+    engine.chunks = [c_delta, c_polaris]
+
+    with patch.object(engine.bm25, "search", return_value=[(0, 1.0), (1, 1.0)]), \
+         patch("polaris.ai.rag.chat_stream", return_value=iter(["Delta Airlines flight receipt for $425.20."])):
+        gen = engine.chat_with_docs_stream("Elaborate the report about the delta airlines", top_k=2)
+        tokens = list(gen)
+        assert "".join(tokens) == "Delta Airlines flight receipt for $425.20."
+
+
+def test_sqlite_fts5_index(tmp_path):
+    db_file = tmp_path / "test_fts5.db"
+    fts = SQLiteFTSIndex(db_file)
+
+    c1 = DocumentChunk("flight.txt", 1, "Delta Air Lines flight expense ticket for Alex Mercer", 0, section="Receipt")
+    c2 = DocumentChunk("financial.md", 1, "Polaris Technologies Q3 revenue $4.2M report", 1, section="Financial Report")
+    fts.build([c1, c2])
+
+    res_delta = fts.search("Delta Airlines")
+    assert len(res_delta) >= 1
+    assert res_delta[0][0] == 0
+
+    res_polaris = fts.search("Polaris revenue")
+    assert len(res_polaris) >= 1
+    assert res_polaris[0][0] == 1
+
+
+def test_format_markdown_simple_inline_citations(qapp):
+    settings = Settings()
+    engine = RagEngine(settings)
+    chat_tab = ChatTab(engine)
+
+    c1 = DocumentChunk("receipt_delta.txt", 1, "Delta flight receipt $425.20", 0)
+    raw_md = "Alex Mercer traveled via Delta Airlines [Source 1] on October 18."
+    formatted = chat_tab._format_markdown_simple(raw_md, cited=[c1])
+
+    assert 'href="citation:0"' in formatted
+    assert "[1]" in formatted
+

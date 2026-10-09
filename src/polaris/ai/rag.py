@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sqlite3
 from typing import Callable, Generator, List, Sequence, Set, Tuple
 import numpy as np
 import faiss
@@ -30,6 +31,31 @@ STOPWORDS = {
     "when", "where", "which", "while", "who", "whom", "why", "with", "won't", "would", "wouldn't",
     "you", "your", "yours", "yourself", "yourselves"
 }
+
+# Generic document, search command, and intent words that should not overshadow specific entities
+GENERIC_QUERY_TERMS = {
+    "report", "reports", "document", "documents", "doc", "docs", "file", "files",
+    "text", "page", "pages", "summary", "summaries", "overview", "notes", "note",
+    "record", "records", "data", "sheet", "sheets", "info", "information",
+    "elaborate", "explain", "describe", "show", "tell", "summarize", "find",
+    "search", "list", "give", "get", "detail", "details", "content", "contents",
+    "section", "sections", "paragraph", "paragraphs"
+}
+
+
+def extract_substantive_query_terms(query: str) -> list[str]:
+    """
+    Extracts high-information entity/subject terms from a user query,
+    filtering out stopwords and generic query/document command words
+    (e.g., 'report', 'elaborate', 'summary', 'file').
+    If the entire query consists of generic terms (e.g. 'show all reports'),
+    falls back to all non-stopword tokens.
+    """
+    tokens = [w.lower() for w in re.findall(r"\w+", query) if len(w) >= 2]
+    substantive = [w for w in tokens if w not in STOPWORDS and w not in GENERIC_QUERY_TERMS]
+    if substantive:
+        return substantive
+    return [w for w in tokens if w not in STOPWORDS]
 
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".txt", ".md", ".markdown", ".rst", ".rtf", ".log",
@@ -160,11 +186,13 @@ def cross_encoder_score(
     chunk: DocumentChunk,
     base_score: float = 0.0,
     q_words: list[str] | None = None,
+    substantive_words: list[str] | None = None,
 ) -> float:
     """
     Computes a fast multi-signal cross-feature score between query and chunk:
     - Exact query phrase containment (+3.0)
     - Keyword overlap & coverage ratio (+2.5 * ratio)
+    - Substantive entity match & distractor penalty
     - Section breadcrumb & filename token match (+1.5)
     - Window proximity of query terms (+1.0)
     - Base retrieval score prior (+1.0 * normalized_base)
@@ -202,7 +230,16 @@ def cross_encoder_score(
             if indices and (max(indices) - min(indices) <= 250):
                 score += 1.0
 
-    # 5. Base score prior
+        # 5. Substantive entity match & distractor penalty
+        sub_terms = substantive_words if substantive_words is not None else extract_substantive_query_terms(query)
+        if sub_terms and any(t not in GENERIC_QUERY_TERMS for t in sub_terms):
+            sub_matches = [w for w in sub_terms if w in text_words or w in file_lower or w in sec_lower]
+            if sub_matches:
+                score += 3.0 * (len(sub_matches) / len(sub_terms))
+            else:
+                score *= 0.1
+
+    # 6. Base score prior
     norm_base = min(1.0, max(0.0, float(base_score)))
     score += norm_base * 1.0
 
@@ -282,10 +319,17 @@ def rerank_chunks(
     # Pre-tokenize query once for ultra-fast candidate scoring
     q_lower = query.lower().strip()
     q_words = [w for w in re.findall(r"\w+", q_lower) if w not in STOPWORDS and len(w) >= 2]
+    sub_words = extract_substantive_query_terms(query)
 
     reranked: list[tuple[DocumentChunk, float]] = []
     for i, (chunk, base_score) in enumerate(pool):
-        cross_score = cross_encoder_score(query, chunk, base_score=base_score, q_words=q_words)
+        cross_score = cross_encoder_score(
+            query,
+            chunk,
+            base_score=base_score,
+            q_words=q_words,
+            substantive_words=sub_words,
+        )
         if i in llm_scores:
             final_score = (cross_score * 0.6) + (llm_scores[i] * 5.0 * 0.4)
         else:
@@ -450,24 +494,29 @@ class BM25Index:
         b = self.b
         avgdl = self.avgdl if self.avgdl > 0 else 1.0
 
+        sub_words = set(extract_substantive_query_terms(query))
+        has_sub_words = len(sub_words) > 0 and any(w not in GENERIC_QUERY_TERMS for w in sub_words)
+
         for t in set(query_tokens):
             idf = self.idf.get(t, 0.0)
             if idf <= 0.0:
                 idf = 0.1
 
             postings = self.inverted_index.get(t, [])
+            term_weight = 1.5 if (has_sub_words and t in sub_words) else 1.0
             for doc_idx, tf in postings:
                 if candidate_indices is not None and doc_idx not in candidate_indices:
                     continue
 
                 dl = self.doc_len[doc_idx]
                 tf_norm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (dl / avgdl)))
-                scores[doc_idx] = scores.get(doc_idx, 0.0) + (idf * tf_norm)
+                scores[doc_idx] = scores.get(doc_idx, 0.0) + (idf * tf_norm * term_weight)
 
             # Boost matches occurring in the filename (instant O(1) set lookup)
+            fn_boost = 2.5 if (has_sub_words and t in sub_words) else (0.2 if (has_sub_words and t in GENERIC_QUERY_TERMS) else 2.0)
             for doc_idx in self.filename_inverted_index.get(t, set()):
                 if candidate_indices is None or doc_idx in candidate_indices:
-                    scores[doc_idx] = scores.get(doc_idx, 0.0) + 2.0
+                    scores[doc_idx] = scores.get(doc_idx, 0.0) + fn_boost
 
         if not scores:
             return []
@@ -511,6 +560,81 @@ def format_chat_export(
     return "\n".join(lines)
 
 
+class SQLiteFTSIndex:
+    """
+    Persistent, disk-backed full-text search index powered by SQLite FTS5.
+    Provides instant cold starts, zero Python RAM overhead for postings lists,
+    and native BM25 ranking for large document collections.
+    """
+    def __init__(self, db_path: Path | str | None = None):
+        self.db_path = str(db_path) if db_path else ":memory:"
+        self._init_db()
+
+    def _init_db(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+                        chunk_id UNINDEXED,
+                        doc_path UNINDEXED,
+                        file_name,
+                        section,
+                        content,
+                        tokenize='unicode61'
+                    );
+                """)
+                conn.commit()
+        except Exception:
+            pass
+
+    def build(self, chunks: list[DocumentChunk]):
+        if not chunks:
+            return
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM chunk_fts;")
+                conn.executemany(
+                    "INSERT INTO chunk_fts(chunk_id, doc_path, file_name, section, content) VALUES (?, ?, ?, ?, ?);",
+                    [
+                        (i, c.doc_path, c.file_name, getattr(c, "section", ""), c.text)
+                        for i, c in enumerate(chunks)
+                    ]
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def save_to_disk(self, disk_path: Path | str, chunks: list[DocumentChunk]):
+        try:
+            disk_fts = SQLiteFTSIndex(disk_path)
+            disk_fts.build(chunks)
+            self.db_path = str(disk_path)
+        except Exception:
+            pass
+
+    def search(self, query: str, top_k: int = 50) -> list[tuple[int, float]]:
+        tokens = [w for w in re.findall(r"\w+", query.lower()) if w not in STOPWORDS and len(w) >= 2]
+        if not tokens:
+            return []
+
+        fts_query = " OR ".join(f'"{t}"' for t in tokens)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "SELECT chunk_id, bm25(chunk_fts) FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?;",
+                    (fts_query, top_k)
+                )
+                rows = cur.fetchall()
+                results = []
+                for cid, raw_score in rows:
+                    pos_score = max(0.001, -float(raw_score))
+                    results.append((int(cid), pos_score))
+                return results
+        except Exception:
+            return []
+
+
 class RagEngine:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
@@ -518,6 +642,7 @@ class RagEngine:
         self.index: faiss.IndexFlatIP | None = None
         self.embeddings: np.ndarray | None = None
         self.bm25: BM25Index = BM25Index()
+        self.fts: SQLiteFTSIndex = SQLiteFTSIndex()
         self.indexed_folder: str = ""
 
     def get_cache_dir(self, folder_path: str) -> Path:
@@ -549,6 +674,10 @@ class RagEngine:
 
             if self.embeddings is not None and len(self.embeddings) == len(self.chunks):
                 np.save(str(cache_dir / "embeddings.npy"), self.embeddings)
+
+            # Persist SQLite FTS5 index to disk
+            fts_file = cache_dir / "fts5.db"
+            self.fts.save_to_disk(fts_file, self.chunks)
 
             file_records: dict[str, dict] = {}
             for chunk in self.chunks:
@@ -594,6 +723,14 @@ class RagEngine:
             self.embeddings = embeddings
             self.indexed_folder = folder_path
             self.bm25.build(chunks)
+
+            fts_file = cache_dir / "fts5.db"
+            if fts_file.is_file():
+                self.fts = SQLiteFTSIndex(fts_file)
+            else:
+                self.fts = SQLiteFTSIndex()
+                self.fts.build(chunks)
+
             return True
         except Exception:
             return False
@@ -601,7 +738,7 @@ class RagEngine:
     def clear_cache(self, folder_path: str) -> bool:
         """Removes the persistent index files for a folder."""
         cache_dir = self.get_cache_dir(folder_path)
-        for fname in ("faiss.index", "embeddings.npy", "metadata.json"):
+        for fname in ("faiss.index", "embeddings.npy", "metadata.json", "fts5.db"):
             f = cache_dir / fname
             if f.is_file():
                 try:
@@ -751,6 +888,7 @@ class RagEngine:
                 self.chunks = final_chunks
                 self.embeddings = embeddings_np
                 self.bm25.build(final_chunks)
+                self.fts.build(final_chunks)
                 self.save_cache(folder_path)
 
                 if progress_cb:
@@ -769,9 +907,11 @@ class RagEngine:
             self.index = None
             self.embeddings = None
             self.bm25.build([])
+            self.fts.build([])
             return 0
 
         self.bm25.build(all_chunks)
+        self.fts.build(all_chunks)
 
         batch_size = 32
         embeddings_list = []
@@ -883,6 +1023,28 @@ class RagEngine:
         elif bm25_ranked:
             scored_candidates = [(idx, 1.0 / (rank + 1)) for rank, idx in enumerate(bm25_ranked)]
 
+        # 5b. Substantive entity prioritization to demote false-positive distractors
+        sub_words = extract_substantive_query_terms(query)
+        if sub_words and any(w not in GENERIC_QUERY_TERMS for w in sub_words):
+            sub_set = set(sub_words)
+            def sub_match_priority(idx: int) -> int:
+                c = self.chunks[idx]
+                has_m = any(
+                    w in c.text.lower()
+                    or w in c.file_name.lower()
+                    or w in getattr(c, "section", "").lower()
+                    for w in sub_set
+                )
+                return 1 if has_m else 0
+
+            has_sub_candidates = any(sub_match_priority(idx) == 1 for idx, _ in scored_candidates)
+            if has_sub_candidates:
+                scored_candidates = sorted(
+                    scored_candidates,
+                    key=lambda item: (sub_match_priority(item[0]), item[1]),
+                    reverse=True
+                )
+
         # 6. Optional Cross-Encoder / LLM Re-ranker
         if use_reranker:
             candidate_chunks = [(self.chunks[idx], score) for idx, score in scored_candidates]
@@ -937,6 +1099,32 @@ class RagEngine:
             use_reranker=use_reranker,
             use_llm_reranker=use_llm_reranker,
         )
+
+        # Prune zero-substantive distractors for prompt synthesis
+        sub_words = extract_substantive_query_terms(question)
+        if sub_words and any(w not in GENERIC_QUERY_TERMS for w in sub_words):
+            sub_set = set(sub_words)
+            has_sub = any(
+                any(
+                    w in chunk.text.lower()
+                    or w in chunk.file_name.lower()
+                    or w in getattr(chunk, "section", "").lower()
+                    for w in sub_set
+                )
+                for chunk, _ in matched
+            )
+            if has_sub:
+                matched = [
+                    (chunk, score)
+                    for chunk, score in matched
+                    if any(
+                        w in chunk.text.lower()
+                        or w in chunk.file_name.lower()
+                        or w in getattr(chunk, "section", "").lower()
+                        for w in sub_set
+                    )
+                ]
+
         # Deduplicate overlapping chunks from same file
         deduped_matched = deduplicate_chunks(matched, overlap_threshold=0.70)
         cand_chunks = [chunk for chunk, _score in deduped_matched]
@@ -961,11 +1149,17 @@ class RagEngine:
             return []
 
         system_prompt = (
-            "You are Polaris AI, an intelligent and precise local desktop document assistant.\n"
-            "Answer the question accurately using ONLY the context provided below.\n"
-            "Cite sources using [filename, Page X] or [Source X]. If the answer is not in the context, "
-            "explicitly state that the indexed documents do not contain that information.\n"
-            "Keep the answer direct, structured, and factual.\n\n"
+            "You are Polaris AI, an intelligent, precise, and rigorously grounded local desktop document assistant.\n\n"
+            "STRICT GROUNDING & ENTITY INTEGRITY RULES:\n"
+            "1. ENTITY INTEGRITY & NO CONFLATION: Never attribute facts, metrics, revenue, dates, or statements from one document "
+            "to another company, person, or topic. Each [Source X] is an independent document. If a document belongs to 'Polaris Technologies' "
+            "and the user asked about 'Delta Airlines', NEVER mix their data or claim that Delta Airlines had Polaris's revenue.\n"
+            "2. DOCUMENT TYPE FIDELITY: If the retrieved documents do not contain the specific type of document requested "
+            "(e.g., user asks for a 'report' about Delta Airlines, but only an 'expense receipt' exists), explicitly clarify what document "
+            "actually exists (e.g., 'The indexed files contain an expense receipt for Delta Airlines, but no corporate financial report.').\n"
+            "3. INLINE CITATIONS: Attribute factual statements with inline citations like [Source X] or [1] so every claim is verified.\n"
+            "4. NO HALLUCINATIONS: If the context does not contain the answer, explicitly state that the indexed documents do not contain that information.\n"
+            "5. Keep the answer structured, clear, and professional.\n\n"
             f"CONTEXT:\n{context_str}"
         )
 

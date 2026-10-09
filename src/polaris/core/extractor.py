@@ -443,6 +443,48 @@ def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
     return []
 
 
+def detect_text_document_section(text: str) -> str:
+    """
+    Detects document header, title, or structured document type from the first lines of text.
+    Handles receipts (e.g. 'EXPENSE RECEIPT'), invoices ('INVOICE'), legal agreements
+    ('MUTUAL NON-DISCLOSURE AGREEMENT'), and title lines.
+    """
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    first = lines[0]
+    upper_first = first.upper()
+
+    doc_types = [
+        "EXPENSE RECEIPT", "RECEIPT", "INVOICE", "PURCHASE ORDER",
+        "NON-DISCLOSURE AGREEMENT", "MUTUAL NON-DISCLOSURE AGREEMENT",
+        "CONFIDENTIALITY AGREEMENT", "MEMORANDUM", "STATEMENT OF WORK",
+        "CONTRACT", "AGREEMENT", "SPECIFICATION", "ARCHITECTURE SPECIFICATION",
+        "MEETING NOTES", "INCIDENT REPORT", "FINANCIAL REPORT", "AUDIT REPORT",
+    ]
+    matched_dt = None
+    for dt in doc_types:
+        if dt in upper_first:
+            matched_dt = first.title() if first.isupper() else first
+            break
+
+    if not matched_dt:
+        if len(first) <= 60 and not first.endswith((".", ":", ";", "?", "!")):
+            if first.isupper() or all(w[0].isupper() for w in first.split() if w.isalnum()):
+                matched_dt = first.title() if first.isupper() else first
+
+    if matched_dt and len(lines) > 1:
+        # Check if line 2 to 4 has Merchant, Vendor, Client, Billed To, Parties
+        for subline in lines[1:4]:
+            m = re.match(r"^(?:Merchant|Vendor|Billed To|Client|Parties|Party):\s*(.+)$", subline, re.IGNORECASE)
+            if m:
+                entity = m.group(1).split("&")[0].strip()
+                return f"{matched_dt} - {entity}"
+    return matched_dt or ""
+
+
 def chunk_file(file_path: Path | str, chunk_chars: int = 1200, overlap: int = 150) -> list[DocumentChunk]:
     """
     Extracts and chunks a file into searchable pieces.
@@ -477,6 +519,7 @@ def chunk_file(file_path: Path | str, chunk_chars: int = 1200, overlap: int = 15
     chunks: list[DocumentChunk] = []
     idx = 0
     for page_num, text in pages:
+        doc_section = detect_text_document_section(text) if ext in (".txt", ".rst", ".rtf", ".log", ".docx") else ""
         page_chunks = chunk_text(text, chunk_chars=overlap, overlap=overlap) if chunk_chars <= overlap else chunk_text(text, chunk_chars, overlap)
         search_offset = 0
         for piece in page_chunks:
@@ -486,7 +529,7 @@ def chunk_file(file_path: Path | str, chunk_chars: int = 1200, overlap: int = 15
                 page=page_num,
                 text=piece,
                 chunk_index=idx,
-                section="",
+                section=doc_section,
                 start_line=s_line,
                 end_line=e_line,
             ))

@@ -651,8 +651,54 @@ class ChatTab(QWidget):
         self.chat_browser.setTextCursor(cursor)
         self._refresh_latest_assistant_bubble(self.current_assistant_text, cited=[])
 
+    def _format_markdown_simple(self, text: str, cited: list[DocumentChunk] | None = None) -> str:
+        """
+        Renders markdown formatting (bold, headers, bullets, inline citations)
+        into styled HTML for the chat browser.
+        """
+        if not text:
+            return ""
+
+        # Escape HTML entities first
+        escaped = (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+        # 1. Bold: **text** -> <b>text</b>
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+
+        # 2. Italic: *text* -> <i>text</i>
+        escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
+
+        # 3. Headers: ### Header -> styled span
+        escaped = re.sub(r"^###\s+(.+)$", r'<b style="font-size: 13px; color: #93c5fd;">\1</b>', escaped, flags=re.MULTILINE)
+        escaped = re.sub(r"^##\s+(.+)$", r'<b style="font-size: 14px; color: #60a5fa;">\1</b>', escaped, flags=re.MULTILINE)
+
+        # 4. Bullet lists: - item or * item
+        escaped = re.sub(r"^[\*\-]\s+(.+)$", r"&bull; \1", escaped, flags=re.MULTILINE)
+
+        # 5. Inline citations: [Source 1], [1], [Source 2] -> interactive links
+        if cited:
+            num_cited = len(cited)
+            def replace_citation(m: re.Match) -> str:
+                n = int(m.group(1))
+                if 1 <= n <= num_cited:
+                    idx = n - 1
+                    return (
+                        f'<a href="citation:{idx}" style="text-decoration:none; font-weight:bold; '
+                        f'background-color:#1e3a8a; color:#93c5fd; padding:1px 5px; border-radius:4px; '
+                        f'font-size:11px; border:1px solid #3b82f6;">[{n}]</a>'
+                    )
+                return m.group(0)
+
+            escaped = re.sub(r"\[(?:Source\s*)?(\d+)\]", replace_citation, escaped)
+
+        return escaped.replace("\n", "<br>")
+
     def _refresh_latest_assistant_bubble(self, text: str, cited: list[DocumentChunk]):
-        formatted_text = text.replace("\n", "<br>")
+        formatted_text = self._format_markdown_simple(text, cited=cited)
         citations_html = ""
         if cited:
             cite_badges = []
@@ -694,16 +740,29 @@ class ChatTab(QWidget):
     def _on_stream_done(self, cited: list):
         self._reset_input_ui()
 
-        self.last_cited_chunks = cited
+        # Filter and prioritize actively cited chunks if the assistant specifically cited them
+        active_indices: list[int] = []
         if cited:
+            for m in re.finditer(r"\[(?:Source\s*)?(\d+)\]", self.current_assistant_text):
+                n = int(m.group(1)) - 1
+                if 0 <= n < len(cited) and n not in active_indices:
+                    active_indices.append(n)
+            for i, c in enumerate(cited):
+                if c.file_name.lower() in self.current_assistant_text.lower() and i not in active_indices:
+                    active_indices.append(i)
+
+        final_cited = [cited[i] for i in active_indices] if active_indices else cited
+
+        self.last_cited_chunks = final_cited
+        if final_cited:
             self.inspect_sources_btn.setEnabled(True)
-            self.inspect_sources_btn.setText(f"🔎 Inspect Citations ({len(cited)})")
+            self.inspect_sources_btn.setText(f"🔎 Inspect Citations ({len(final_cited)})")
         else:
             self.inspect_sources_btn.setEnabled(False)
             self.inspect_sources_btn.setText("🔎 Inspect Source Citations")
 
-        self._refresh_latest_assistant_bubble(self.current_assistant_text, cited=cited)
-        self.history.append({"role": "assistant", "content": self.current_assistant_text, "cited": cited})
+        self._refresh_latest_assistant_bubble(self.current_assistant_text, cited=final_cited)
+        self.history.append({"role": "assistant", "content": self.current_assistant_text, "cited": final_cited})
 
     def _on_stream_failed(self, err: str):
         self._reset_input_ui()
