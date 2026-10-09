@@ -1,0 +1,23 @@
+MUTUAL NON-DISCLOSURE AGREEMENT (NDA)
+Effective Date: September 1, 2024
+Parties:
+1. SortPilot Technologies Inc. ("Disclosing Party")
+2. Quantum Ventures Capital LLC ("Receiving Party")
+
+1. PURPOSE
+The parties wish to explore a potential strategic financing partnership and evaluate proprietary local AI desktop architecture ("Purpose").
+
+2. CONFIDENTIAL INFORMATION
+"Confidential Information" refers to all non-public technical documentation, financial projections, source code, and architecture specifications disclosed by either party.
+
+3. OBLIGATIONS
+The Receiving Party agrees to:
+a) Hold Confidential Information in strict confidence.
+b) Restrict access solely to partners and legal advisors with a need-to-know.
+c) Not reverse-engineer or re-distribute any local inference weights or software builds.
+
+4. TERM & TERMINATION
+This agreement shall remain in effect for a period of three (3) years from the Effective Date, expiring on September 1, 2027.
+
+Signatures:
+Elena Vance (SortPilot)              Marcus Sterling (Quantum Ventures)

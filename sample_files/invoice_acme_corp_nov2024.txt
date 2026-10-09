@@ -1,0 +1,18 @@
+INVOICE #INV-2024-8841
+Date: November 15, 2024
+Billed To: SortPilot Inc.
+Vendor: Acme Cloud Solutions & Hardware
+Tax ID: 84-2910391
+
+Item Description                  Qty    Rate        Amount
+------------------------------------------------------------
+Local Inference Server Nodes        2    $3,500.00   $7,000.00
+NVMe High-Speed Storage 4TB         4      $320.00   $1,280.00
+24-Port Managed Gigabit Switch      1      $450.00     $450.00
+------------------------------------------------------------
+Subtotal:                                            $8,730.00
+Sales Tax (8.25%):                                     $720.22
+Total Balance Due:                                   $9,450.22
+
+Payment Terms: Net 30 days
+Bank Transfer: Acme Corp / Chase Bank / Acct: ****8912

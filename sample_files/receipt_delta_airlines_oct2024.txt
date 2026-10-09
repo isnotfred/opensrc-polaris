@@ -1,0 +1,16 @@
+EXPENSE RECEIPT
+Merchant: Delta Air Lines
+Date: October 18, 2024
+Passenger: Alex Mercer
+Confirmation: DL-882910X
+
+Flight: SEA (Seattle) -> SFO (San Francisco)
+Seat: 12C (Main Cabin Extra)
+Ticket Fare: $342.00
+Taxes & Carrier Surcharges: $48.20
+Baggage Fee: $35.00
+Total Paid: $425.20
+
+Payment Method: Visa ending in 4108
+Status: Confirmed & Paid
+Purpose: AI Hardware Expo Conference Attendance
