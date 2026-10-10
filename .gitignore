@@ -66,4 +66,7 @@ ehthumbs.db
 *.log
 tmp/
 brag-output/work/
+brag-output-node/work/
+node_modules/
+package-lock.json
 
