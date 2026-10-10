@@ -89,3 +89,25 @@ The user requested narrowing the scope to focus exclusively on local AI capabili
     * Planner schema allowlist validation.
     * Extractor page parsing & text chunking.
     * UI tabs initialization & preview population.
+
+---
+
+## Phase 7: AI Organize Enhancements, Live Watcher & Reliability Polish (`feature/ai-organize`)
+* **AI Organize Tab & Batching UX**:
+  * Added drag-and-drop source selection, real-time preview table text filtering, in-table editable destinations, and duplicate/copy mode.
+  * Added batch progress feedback (`progress` signal) to `AIPlanWorker` displaying "AI planning batch X of Y…".
+  * Fixed rule-based fallback issue by injecting folder structure cues and sample templates into Ollama planner prompt.
+  * Replaced silent exception swallowing with structured logging.
+* **Live Download Watcher & Desktop Toasts**:
+  * Implemented `DownloadWatcherWorker` and floating desktop `SuggestionToast` stack with auto-dismiss and direct file apply.
+  * Added `file_size_bytes` calculation and human-readable size labels in suggestion toasts.
+  * Deferred watcher start with non-blocking error handling if `~/Downloads` is missing.
+  * Cleaned up finished worker threads dynamically.
+* **Core Safety & Undo Polish**:
+  * Introduced `ApplyResult(batch_id, succeeded, failed)` for accurate per-file success/failure counts.
+  * Made `undo_batch()` support `ApplyResult` and fixed guard check to prevent overwriting existing files while gracefully skipping missing destination files.
+  * Capped `unique_destination()` loop to prevent infinite loops.
+  * Upgraded PyMuPDF import to modern API (`import pymupdf as fitz`) and resolved datetime deprecation warnings.
+* **Test Suite Expansion**:
+  * Added dedicated integration and unit tests in `tests/test_organize.py`, bringing test suite to 17 passing tests.
+

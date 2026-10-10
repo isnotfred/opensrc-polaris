@@ -40,10 +40,12 @@ def test_organize_conflict_safe_and_undo(tmp_path):
     conn = connect(tmp_path / "t.db")
     moves = plan_by_type([str(src / "n.txt")], str(out))
     assert moves[0].dst.endswith("n (1).txt")
-    batch = apply_moves(conn, moves)
+    result = apply_moves(conn, moves)
+    assert result.succeeded == 1
+    assert result.failed == 0
     assert (out / "Documents" / "n.txt").read_text() == "existing"   # not overwritten
     assert (out / "Documents" / "n (1).txt").read_text() == "new"
-    assert undo_batch(conn, batch) == (1, 0)
+    assert undo_batch(conn, result.batch_id) == (1, 0)
     assert (src / "n.txt").read_text() == "new"
 
 
@@ -64,3 +66,23 @@ def test_planner_rejects_bad_plans(tmp_path):
         validate_plan({"action": "find_duplicates", "source_directory": "/etc"}, roots)
     with pytest.raises(PlanError):
         validate_plan("not json at all", roots)
+
+
+def test_plan_by_type_and_size(tmp_path):
+    from polaris.core.organizer import plan_by_type_and_size
+    src = tmp_path / "files"
+    src.mkdir()
+    doc = src / "doc.docx"
+    doc.write_text("small document")
+    img = src / "pic.png"
+    img.write_bytes(b"x" * (1024 * 1024 * 2))  # 2MB medium file
+
+    out = tmp_path / "organized"
+    moves = plan_by_type_and_size([str(doc), str(img)], str(out))
+    assert len(moves) == 2
+
+    # docx should go to Documents/Small (under 1MB)
+    assert any("Documents" in m.dst and "Small (under 1MB)" in m.dst and "doc.docx" in m.dst for m in moves)
+    # png should go to Images/Medium (1MB-50MB)
+    assert any("Images" in m.dst and "Medium (1MB-50MB)" in m.dst and "pic.png" in m.dst for m in moves)
+

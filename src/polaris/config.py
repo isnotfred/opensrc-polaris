@@ -15,6 +15,9 @@ class Settings:
     large_file_mb: int = 500
     chunk_chars: int = 800
     chunk_overlap: int = 100
+    ollama_keep_alive: str = os.getenv("POLARIS_KEEP_ALIVE", "30m")
+    num_threads: int = int(os.getenv("POLARIS_NUM_THREADS", "0"))  # 0 = auto-detect physical cores
+
 
     @property
     def db_path(self) -> Path:
