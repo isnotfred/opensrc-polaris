@@ -368,7 +368,6 @@ def read_text_safe(path: Path) -> str:
         except Exception:
             return raw.decode("utf-8", errors="replace").strip()
 
-
 def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
     """
     Extracts text from a file by page/section.
@@ -384,12 +383,16 @@ def extract_text_from_file(file_path: Path | str) -> list[tuple[int, str]]:
     # PDF via PyMuPDF
     if ext == ".pdf":
         try:
-            import pymupdf as fitz  # noqa: F401 — pymupdf is the modern API
+            try:
+                import fitz
+            except ImportError:
+                import pymupdf as fitz  # noqa: F401
             doc = fitz.open(str(path))
             pages = []
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                text = page.get_text("text").strip()
+                raw_text = page.get_text("text")
+                text = str(raw_text).strip() if isinstance(raw_text, str) else ""
                 if text:
                     pages.append((page_num + 1, text))
             return pages

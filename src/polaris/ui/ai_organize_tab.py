@@ -55,27 +55,47 @@ def _friendly_timestamp(ts: str) -> str:
 
 
 class AIPlanWorker(QThread):
-    done = Signal(list)
+    done = Signal(list, str, str)  # moves, strategy_name, explanation
     failed = Signal(str)
     progress = Signal(int, int)  # current_batch, total_batches
 
-    def __init__(self, file_paths: list[str], dest_dir: str, instruction: str, settings: Settings):
+    def __init__(
+        self,
+        file_paths: list[str],
+        dest_dir: str,
+        instruction: str,
+        settings: Settings,
+        mode: str = "custom",
+    ):
         super().__init__()
         self.file_paths = file_paths
         self.dest_dir = dest_dir
         self.instruction = instruction
         self.settings = settings
+        self.mode = mode
 
     def run(self):
         try:
-            if self.instruction.strip().lower() == "__rule_based__":
+            if self.mode == "rule_based" or self.instruction.strip().lower() == "__rule_based__":
                 moves = plan_by_type(self.file_paths, self.dest_dir)
-            else:
-                moves = plan_with_ai(
-                    self.file_paths, self.dest_dir, self.instruction, self.settings,
-                    progress_callback=lambda cur, tot: self.progress.emit(cur, tot),
+                strategy_name = "⚡ Fast Rule-based (by Type)"
+                explanation = (
+                    "Files were deterministically sorted into standard category folders "
+                    "(Documents, Presentations, Spreadsheets, Images, Videos, Audio, Archives, Code) "
+                    "based purely on file extensions."
                 )
-            self.done.emit(moves)
+            elif self.mode == "smart_ai" or not self.instruction.strip():
+                moves = plan_with_ai(self.file_paths, self.dest_dir, "", self.settings)
+                strategy_name = "🧠 Smart Auto-Organize (Autonomous AI Logic)"
+                explanation = (
+                    "Files were analyzed by Ollama Llama 3.2 and automatically organized into logical subfolders "
+                    "based on detected project names, topics, file types, and contents."
+                )
+            else:
+                moves = plan_with_ai(self.file_paths, self.dest_dir, self.instruction, self.settings)
+                strategy_name = f'✨ Custom Instructions: "{self.instruction.strip()}"'
+                explanation = f"Files were organized according to your prompt: \"{self.instruction.strip()}\"."
+            self.done.emit(moves, strategy_name, explanation)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -141,6 +161,10 @@ class AIOrganizeTab(QWidget):
         super().__init__()
         self.settings = settings or Settings()
         self.current_moves: list[Move] = []
+        self._last_applied_moves: list[Move] = []
+        self.last_strategy_name: str = "Ready to plan"
+        self.last_explanation: str = "Choose a planning method to organize files."
+        self.last_mode: str = "custom"
         self.plan_worker: AIPlanWorker | None = None
         self.apply_worker: ApplyWorker | None = None
         self.undo_worker: UndoWorker | None = None
@@ -194,35 +218,44 @@ class AIOrganizeTab(QWidget):
         fg_layout.addLayout(opts_row)
         layout.addWidget(folder_group)
 
-        # 2. AI Instructions & Presets
-        ai_group = QGroupBox("2. Local AI Instructions (Powered by Qwen 2.5 / Llama 3.2)")
+        # 2. AI Instructions
+        ai_group = QGroupBox("2. Local AI Instructions (Powered by Ollama Llama 3.2)")
         ai_layout = QVBoxLayout(ai_group)
 
         self.instruction_edit = QLineEdit()
         self.instruction_edit.setPlaceholderText(
-            "e.g. 'Organize research papers by topic', 'Group invoices by client', or leave blank for smart auto-grouping"
+            "e.g. 'sort by file type, then size', 'group invoices by client', or click a preset..."
         )
         ai_layout.addWidget(self.instruction_edit)
 
+        # Quick Presets Row
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Quick Presets:"))
 
-        p1 = QPushButton("Smart Auto-Group")
-        p1.clicked.connect(lambda: self.instruction_edit.setText("Group into logical folders based on project, topic, and file contents"))
-        preset_row.addWidget(p1)
+        p_type_size = QPushButton("📁 Sort by Type, then Size")
+        p_type_size.clicked.connect(lambda: self.instruction_edit.setText("Sort by file type, then size (Small under 1MB, Medium 1MB-50MB, Large over 50MB)"))
+        preset_row.addWidget(p_type_size)
 
-        p2 = QPushButton("Sort by Year & Date")
-        p2.clicked.connect(lambda: self.instruction_edit.setText("Group files by their relevant year or date"))
-        preset_row.addWidget(p2)
+        p_size_only = QPushButton("📊 Sort by Size Brackets")
+        p_size_only.clicked.connect(lambda: self.instruction_edit.setText("Group into size categories: Small (under 1MB), Medium (1MB-50MB), Large (over 50MB)"))
+        preset_row.addWidget(p_size_only)
 
-        p3 = QPushButton("Sort by Project / Client")
-        p3.clicked.connect(lambda: self.instruction_edit.setText("Identify project names or clients and group corresponding files"))
-        preset_row.addWidget(p3)
+        p_smart = QPushButton("⚡ Smart Auto-Group")
+        p_smart.clicked.connect(lambda: self.instruction_edit.setText("Group into logical folders based on project, topic, and file contents"))
+        preset_row.addWidget(p_smart)
+
+        p_date = QPushButton("📅 Sort by Year & Date")
+        p_date.clicked.connect(lambda: self.instruction_edit.setText("Group files by their relevant year or date"))
+        preset_row.addWidget(p_date)
+
+        p_proj = QPushButton("🏢 Sort by Project / Client")
+        p_proj.clicked.connect(lambda: self.instruction_edit.setText("Identify project names or clients and group corresponding files"))
+        preset_row.addWidget(p_proj)
 
         preset_row.addStretch()
 
         self.ai_plan_btn = QPushButton("✨ Plan with Local AI")
-        self.ai_plan_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 14px;")
+        self.ai_plan_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 12px;")
         self.ai_plan_btn.clicked.connect(lambda: self.generate_plan(is_rule_based=False))
         preset_row.addWidget(self.ai_plan_btn)
 
@@ -231,6 +264,38 @@ class AIOrganizeTab(QWidget):
         preset_row.addWidget(self.fast_plan_btn)
 
         ai_layout.addLayout(preset_row)
+
+        # Action Buttons Row
+        action_row = QHBoxLayout()
+        action_row.addWidget(QLabel("Plan Method:"))
+
+        # Button 1: Adhere strictly to user's entered instructions
+        self.ai_custom_btn = QPushButton("✨ Plan with Custom Instructions")
+        self.ai_custom_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 14px; border-radius: 4px;")
+        self.ai_custom_btn.setToolTip("Strictly executes the instructions typed into the box above using Ollama AI.")
+        self.ai_custom_btn.clicked.connect(lambda: self.generate_plan(mode="custom"))
+        action_row.addWidget(self.ai_custom_btn)
+
+        # Alias for backward compatibility
+        self.ai_plan_btn = self.ai_custom_btn
+
+        # Button 2: Autonomous AI Logic
+        self.ai_smart_btn = QPushButton("🧠 Smart Auto-Organize (AI Logic)")
+        self.ai_smart_btn.setStyleSheet("font-weight: bold; background-color: #059669; color: white; padding: 6px 14px; border-radius: 4px;")
+        self.ai_smart_btn.setToolTip("Uses AI's own autonomous logic to categorize files by topic, project, and type without custom text.")
+        self.ai_smart_btn.clicked.connect(lambda: self.generate_plan(mode="smart_ai"))
+        action_row.addWidget(self.ai_smart_btn)
+
+        # Button 3: Deterministic Rule-based
+        self.fast_plan_btn = QPushButton("⚡ Fast Rule-based (by Type)")
+        self.fast_plan_btn.setStyleSheet("font-weight: bold; padding: 6px 12px;")
+        self.fast_plan_btn.setToolTip("Instantly organizes files into standard format categories (Documents, Images, Code, etc.) without calling AI.")
+        self.fast_plan_btn.clicked.connect(lambda: self.generate_plan(mode="rule_based"))
+        action_row.addWidget(self.fast_plan_btn)
+
+        action_row.addStretch()
+        ai_layout.addLayout(action_row)
+
         layout.addWidget(ai_group)
 
         # Progress bar
@@ -242,6 +307,23 @@ class AIOrganizeTab(QWidget):
         # 3. Preview Table & Selection
         table_group = QGroupBox("3. Proposed Moves (Preview & Customize)")
         tg_layout = QVBoxLayout(table_group)
+
+        # Active Strategy & Reasoning Banner
+        self.strategy_banner = QGroupBox("Active Strategy & AI Rationale")
+        sb_layout = QVBoxLayout(self.strategy_banner)
+        sb_layout.setContentsMargins(10, 8, 10, 8)
+
+        self.strategy_title_label = QLabel("📌 Strategy: Ready to plan")
+        self.strategy_title_label.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        self.strategy_desc_label = QLabel("💡 How & Why It Sorted: Choose an organization method above to preview.")
+        self.strategy_desc_label.setWordWrap(True)
+        self.strategy_folders_label = QLabel("")
+        self.strategy_folders_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+
+        sb_layout.addWidget(self.strategy_title_label)
+        sb_layout.addWidget(self.strategy_desc_label)
+        sb_layout.addWidget(self.strategy_folders_label)
+        tg_layout.addWidget(self.strategy_banner)
 
         top_table_row = QHBoxLayout()
         sel_all_btn = QPushButton("Select All")
@@ -439,78 +521,47 @@ class AIOrganizeTab(QWidget):
         if folder:
             self.src_edit.setText(folder)
 
-    def _on_filter_changed(self, text: str):
-        query = text.strip().lower()
-        for row in range(self.table.rowCount()):
-            if not query:
-                self.table.setRowHidden(row, False)
-                continue
+    def generate_plan(self, mode: str = "custom", is_rule_based: bool | None = None):
+        if is_rule_based is True:
+            mode = "rule_based"
+        elif is_rule_based is False and mode == "custom":
+            pass
 
-            file_text = (self.table.item(row, 1).text() if self.table.item(row, 1) else "").lower()
-            dst_text = (self.table.item(row, 2).text() if self.table.item(row, 2) else "").lower()
-            reason_text = (self.table.item(row, 3).text() if self.table.item(row, 3) else "").lower()
-
-            matched = query in file_text or query in dst_text or query in reason_text
-            self.table.setRowHidden(row, not matched)
-
-    def _show_context_menu(self, pos):
-        item = self.table.itemAt(pos)
-        if not item:
-            return
-
-        row = item.row()
-        src_path_item = self.table.item(row, 4)
-        if not src_path_item:
-            return
-
-        src_path = src_path_item.text()
-        menu = QMenu(self)
-
-        reveal_action = QAction("📂 Reveal in File Explorer", self)
-        reveal_action.triggered.connect(lambda: self._reveal_in_explorer(src_path))
-        menu.addAction(reveal_action)
-
-        open_action = QAction("📄 Open File", self)
-        open_action.triggered.connect(lambda: self._open_file(src_path))
-        menu.addAction(open_action)
-
-        menu.addSeparator()
-
-        chk_item = self.table.item(row, 0)
-        if chk_item and chk_item.checkState() == Qt.CheckState.Checked:
-            toggle_action = QAction("❌ Exclude from Organization", self)
-            toggle_action.triggered.connect(lambda: chk_item.setCheckState(Qt.CheckState.Unchecked))
-        else:
-            toggle_action = QAction("✅ Include in Organization", self)
-            toggle_action.triggered.connect(lambda: chk_item.setCheckState(Qt.CheckState.Checked))
-        menu.addAction(toggle_action)
-
-        menu.exec(self.table.viewport().mapToGlobal(pos))
-
-    def _reveal_in_explorer(self, file_path: str):
-        p = Path(file_path)
-        if p.exists():
-            subprocess.Popen(f'explorer /select,"{p.resolve()}"')
-
-    def _open_file(self, file_path: str):
-        p = Path(file_path)
-        if p.exists():
-            os.startfile(str(p.resolve()))
-
-    def generate_plan(self, is_rule_based: bool = False):
         folder = self.src_edit.text().strip()
         if not folder or not Path(folder).is_dir():
             QMessageBox.warning(self, "Invalid Folder", "Please choose a valid existing folder.")
             return
 
-        self.ai_plan_btn.setEnabled(False)
+        instruction = self.instruction_edit.text().strip()
+        if mode == "custom" and not instruction:
+            QMessageBox.information(
+                self,
+                "Custom Instruction Needed",
+                "Please enter your custom sort instructions in the text box (e.g. 'sort by file type, then size') "
+                "or click one of the Quick Presets.\n\n"
+                "To organize automatically without typing instructions, click '🧠 Smart Auto-Organize (AI Logic)'.",
+            )
+            self.instruction_edit.setFocus()
+            return
+
+        self.last_mode = mode
+        self.ai_custom_btn.setEnabled(False)
+        self.ai_smart_btn.setEnabled(False)
         self.fast_plan_btn.setEnabled(False)
         self.apply_btn.setEnabled(False)
         self.progress_bar.show()
 
-        instruction = "__rule_based__" if is_rule_based else self.instruction_edit.text().strip()
-        method_name = "Rule-based organizer" if is_rule_based else "Local AI (Qwen / Llama)"
-        self.status_label.setText(f"Scanning files for {method_name}...")
+        if mode == "rule_based":
+            plan_instruction = "__rule_based__"
+            method_name = "Rule-based organizer"
+        elif mode == "smart_ai":
+            plan_instruction = ""
+            method_name = "Smart Auto-Organize AI"
+        else:
+            plan_instruction = instruction
+            method_name = "Ollama AI"
+
+        self.status_label.setText(f"Analyzing files with {method_name}...")
 
         p = Path(folder)
         if self.subfolders_check.isChecked():
@@ -520,27 +571,74 @@ class AIOrganizeTab(QWidget):
 
         if not files:
             self.progress_bar.hide()
-            self.ai_plan_btn.setEnabled(True)
+            self.ai_custom_btn.setEnabled(True)
+            self.ai_smart_btn.setEnabled(True)
             self.fast_plan_btn.setEnabled(True)
             self.table.setRowCount(0)
             self.count_label.setText("No files found in folder.")
             self.status_label.setText("No files to organize.")
             return
 
-        self.plan_worker = AIPlanWorker(files, folder, instruction, self.settings)
+        self.plan_worker = AIPlanWorker(files, folder, plan_instruction, self.settings, mode=mode)
         self.plan_worker.done.connect(self._show_preview)
         self.plan_worker.failed.connect(self._plan_failed)
         self.plan_worker.progress.connect(self._on_plan_progress)
         self.plan_worker.start()
 
     def _on_plan_progress(self, current: int, total: int):
-        self.status_label.setText(f"AI planning batch {current} of {total}…")
+        if total > 0:
+            self.progress_bar.setRange(0, total)
+            self.progress_bar.setValue(current)
+            self.status_label.setText(f"Analyzing files... ({current}/{total} batches)")
 
-    def _show_preview(self, moves: list[Move]):
+    def _show_preview(
+        self,
+        moves: list[Move],
+        strategy_name: str = "",
+        explanation: str = "",
+    ):
         self.progress_bar.hide()
-        self.ai_plan_btn.setEnabled(True)
+        self.ai_custom_btn.setEnabled(True)
+        self.ai_smart_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
         self.current_moves = moves
+
+        if not strategy_name:
+            strategy_name = "Organized Files Preview"
+            explanation = "Preview of proposed file moves based on extension rules."
+
+        self.last_strategy_name = strategy_name
+        self.last_explanation = explanation
+
+        self.strategy_title_label.setText(f"📌 Active Strategy: {strategy_name}")
+        self.strategy_desc_label.setText(f"💡 Rationale: {explanation}")
+
+        # Compute destination folder breakdown
+        root_str = self.src_edit.text().strip()
+        root = Path(root_str) if root_str else None
+        counts: dict[str, int] = {}
+        for m in moves:
+            dst = Path(m.dst)
+            folder_display = "Subfolder"
+            if root:
+                try:
+                    rel = dst.relative_to(root).parent
+                    folder_display = str(rel).replace("\\", "/")
+                    if folder_display == ".":
+                        folder_display = "Root"
+                except Exception:
+                    folder_display = dst.parent.name
+            else:
+                folder_display = dst.parent.name
+            counts[folder_display] = counts.get(folder_display, 0) + 1
+
+        summary_items = [f"{k} ({v})" for k, v in sorted(counts.items())]
+        if summary_items:
+            self.strategy_folders_label.setText(
+                f"📁 Destination Folders ({len(counts)}): {', '.join(summary_items[:5])}{'...' if len(counts) > 5 else ''}"
+            )
+        else:
+            self.strategy_folders_label.setText("")
 
         self.table.setRowCount(len(moves))
         for i, m in enumerate(moves):
@@ -576,16 +674,103 @@ class AIOrganizeTab(QWidget):
 
         total = len(moves)
         self.count_label.setText(f"{total} proposed move(s).")
-        self.status_label.setText(f"Preview ready: {total} files planned. Double-click any destination cell to customize.")
+        self.status_label.setText(f"Preview ready: {total} files planned.")
         self.apply_btn.setEnabled(total > 0)
         self._on_filter_changed(self.filter_edit.text())
 
     def _plan_failed(self, err: str):
         self.progress_bar.hide()
-        self.ai_plan_btn.setEnabled(True)
+        self.ai_custom_btn.setEnabled(True)
+        self.ai_smart_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
         self.status_label.setText(f"Planning failed: {err}")
         QMessageBox.critical(self, "Error", f"Failed to plan moves: {err}")
+
+    def _on_filter_changed(self, text: str):
+        """Show/hide table rows based on the filter text (case-insensitive substring match)."""
+        query = text.strip().lower()
+        visible_count = 0
+        for row in range(self.table.rowCount()):
+            if not query:
+                self.table.setRowHidden(row, False)
+                visible_count += 1
+                continue
+            match = False
+            for col in range(self.table.columnCount()):
+                item = self.table.item(row, col)
+                if item and query in item.text().lower():
+                    match = True
+                    break
+            self.table.setRowHidden(row, not match)
+            if match:
+                visible_count += 1
+        total = self.table.rowCount()
+        if query:
+            self.count_label.setText(f"Showing {visible_count} of {total} move(s).")
+        else:
+            self.count_label.setText(f"{total} proposed move(s).")
+
+    def _show_context_menu(self, pos):
+        """Right-click context menu for the preview table rows."""
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        menu = QMenu(self)
+
+        # Open source file location
+        open_src_action = QAction("📂 Open Source Location", self)
+        def _open_src():
+            src_item = self.table.item(row, 4)
+            if src_item:
+                src_path = Path(src_item.text())
+                folder = src_path.parent
+                if folder.exists():
+                    if os.name == "nt":
+                        subprocess.Popen(["explorer", "/select,", str(src_path)])
+                    else:
+                        subprocess.Popen(["xdg-open", str(folder)])
+        open_src_action.triggered.connect(_open_src)
+        menu.addAction(open_src_action)
+
+        # Open destination folder
+        open_dst_action = QAction("📁 Open Destination Folder", self)
+        def _open_dst():
+            dst_item = self.table.item(row, 2)
+            if dst_item:
+                dst_path = Path(dst_item.text())
+                folder = dst_path.parent
+                if folder.exists():
+                    if os.name == "nt":
+                        subprocess.Popen(["explorer", str(folder)])
+                    else:
+                        subprocess.Popen(["xdg-open", str(folder)])
+        open_dst_action.triggered.connect(_open_dst)
+        menu.addAction(open_dst_action)
+
+        menu.addSeparator()
+
+        # Toggle check state
+        chk_item = self.table.item(row, 0)
+        if chk_item:
+            is_checked = chk_item.checkState() == Qt.CheckState.Checked
+            toggle_action = QAction("☐ Uncheck" if is_checked else "☑ Check", self)
+            def _toggle():
+                new_state = Qt.CheckState.Unchecked if is_checked else Qt.CheckState.Checked
+                chk_item.setCheckState(new_state)
+            toggle_action.triggered.connect(_toggle)
+            menu.addAction(toggle_action)
+
+        # Remove row
+        remove_action = QAction("🗑️ Remove from Preview", self)
+        def _remove():
+            self.table.removeRow(row)
+            total = self.table.rowCount()
+            self.count_label.setText(f"{total} proposed move(s).")
+        remove_action.triggered.connect(_remove)
+        menu.addAction(remove_action)
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _set_all_checked(self, checked: bool):
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
@@ -619,17 +804,18 @@ class AIOrganizeTab(QWidget):
 
         confirm = QMessageBox.question(
             self,
-            f"Confirm {verb}",
-            f"{verb} {len(selected_moves)} file(s)?\n\n"
-            f"Mode: {'Duplicate without deleting originals' if mode == 'copy' else 'Relocate to organized subfolders'}.\n"
-            "This operation can be completely undone at any time.",
+            "Confirm Organization",
+            f"Move {len(selected_moves)} file(s)?\n\n"
+            "This operation will organize files safely and can be undone at any time.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
+        self._last_applied_moves = list(selected_moves)
         self.apply_btn.setEnabled(False)
-        self.ai_plan_btn.setEnabled(False)
+        self.ai_custom_btn.setEnabled(False)
+        self.ai_smart_btn.setEnabled(False)
         self.fast_plan_btn.setEnabled(False)
         self.progress_bar.show()
         self.status_label.setText(f"Applying {len(selected_moves)} operations ({mode})...")
@@ -641,26 +827,24 @@ class AIOrganizeTab(QWidget):
 
     def _apply_done(self, batch_id: str, succeeded: int, failed: int, mode: str):
         self.progress_bar.hide()
-        self.ai_plan_btn.setEnabled(True)
+        self.ai_custom_btn.setEnabled(True)
+        self.ai_smart_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
-        action_name = "copied" if mode == "copy" else "moved"
-        status = f"Done! {action_name.capitalize()} {succeeded} file(s). Batch: {batch_id[:8]}"
-        if failed:
-            status += f"  ({failed} failed)"
-        self.status_label.setText(status)
-        detail = f"Successfully {action_name} {succeeded} file(s)!"
-        if failed:
-            detail += f"\n⚠️ {failed} file(s) could not be {action_name} (check permissions)."
-        detail += f"\nBatch ID: {batch_id}\n\nYou can undo this batch at any time."
-        QMessageBox.information(self, "Operations Applied", detail)
+        action = "Copied" if mode == "copy" else "Moved"
+        self.status_label.setText(f"Done! {action} {succeeded} file(s). Batch ID: {batch_id}")
+        QMessageBox.information(
+            self,
+            "Moves Applied",
+            f"Successfully organized {succeeded} file(s)!\nBatch ID: {batch_id}\n\n"
+            "You can undo this batch at any time using the History & Undo section.",
+        )
         self.refresh_history()
-        # Only re-plan if the user still has a folder selected
-        if self.src_edit.text().strip():
-            self.generate_plan(is_rule_based=False)
+        self.generate_plan(mode=self.last_mode)
 
     def _apply_failed(self, err: str):
         self.progress_bar.hide()
-        self.ai_plan_btn.setEnabled(True)
+        self.ai_custom_btn.setEnabled(True)
+        self.ai_smart_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
         self.apply_btn.setEnabled(True)
         self.status_label.setText(f"Operation failed: {err}")
@@ -728,7 +912,7 @@ class AIOrganizeTab(QWidget):
         QMessageBox.information(self, "Undo Complete", msg)
         self.refresh_history()
         if self.src_edit.text().strip():
-            self.generate_plan(is_rule_based=False)
+            self.generate_plan(mode=self.last_mode)
 
     def _undo_failed(self, err: str):
         self.progress_bar.hide()

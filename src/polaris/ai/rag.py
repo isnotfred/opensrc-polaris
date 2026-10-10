@@ -644,6 +644,7 @@ class RagEngine:
         self.bm25: BM25Index = BM25Index()
         self.fts: SQLiteFTSIndex = SQLiteFTSIndex()
         self.indexed_folder: str = ""
+        self.indexed_files: list[str] = []
 
     def get_cache_dir(self, folder_path: str) -> Path:
         """Determines unique persistent cache directory for a target document folder."""
@@ -790,6 +791,8 @@ class RagEngine:
             f for f in folder.rglob("*")
             if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
         ], key=lambda p: str(p))
+
+        self.indexed_files = [f.name for f in target_files]
 
         if not target_files:
             self.chunks = []
@@ -1132,9 +1135,30 @@ class RagEngine:
         # Assemble context within token/char budget (keeps prompt crisp on CPU)
         context_str, retrieved_chunks = assemble_prompt_context(cand_chunks, max_context_chars=4000)
 
+        manifest_clause = ""
+        if self.indexed_files:
+            file_names_list = ", ".join(f"`{name}`" for name in self.indexed_files)
+            manifest_clause = (
+                f"\nFOLDER FILE MANIFEST:\n"
+                f"The indexed folder contains exactly {len(self.indexed_files)} physical file(s): {file_names_list}.\n"
+                f"URLs, links, or online profiles (e.g. LinkedIn, GitHub) mentioned inside a document's text are NOT files in the folder.\n"
+            )
+
         if not retrieved_chunks:
+            fallback_info = (
+                f"The folder currently contains {len(self.indexed_files)} file(s): {', '.join(self.indexed_files)}."
+                if self.indexed_files
+                else "No relevant files or chunks were found in the folder."
+            )
             messages = [
-                {"role": "system", "content": "You are a helpful desktop assistant. Keep answers concise."},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Polaris AI, an intelligent desktop assistant. "
+                        f"{fallback_info} "
+                        "Answer the question directly and concisely."
+                    ),
+                },
             ]
             if history:
                 messages.extend(
@@ -1144,12 +1168,17 @@ class RagEngine:
                 )
             messages.append({"role": "user", "content": question})
 
-            for token in chat_stream(self.settings, messages, options={"num_predict": 250, "num_ctx": 2048}):
+            for token in chat_stream(
+                self.settings,
+                messages,
+                options={"num_predict": 450, "num_ctx": 2048, "temperature": 0.2},
+            ):
                 yield token
             return []
 
         system_prompt = (
-            "You are Polaris AI, an intelligent, precise, and rigorously grounded local desktop document assistant.\n\n"
+            "You are Polaris AI, an intelligent, precise, and rigorously grounded local desktop document assistant.\n"
+            f"{manifest_clause}\n"
             "STRICT GROUNDING & ENTITY INTEGRITY RULES:\n"
             "1. ENTITY INTEGRITY & NO CONFLATION: Never attribute facts, metrics, revenue, dates, or statements from one document "
             "to another company, person, or topic. Each [Source X] is an independent document. If a document belongs to 'Polaris Technologies' "
@@ -1159,8 +1188,8 @@ class RagEngine:
             "actually exists (e.g., 'The indexed files contain an expense receipt for Delta Airlines, but no corporate financial report.').\n"
             "3. INLINE CITATIONS: Attribute factual statements with inline citations like [Source X] or [1] so every claim is verified.\n"
             "4. NO HALLUCINATIONS: If the context does not contain the answer, explicitly state that the indexed documents do not contain that information.\n"
-            "5. Keep the answer structured, clear, and professional.\n\n"
-            f"CONTEXT:\n{context_str}"
+            "5. Keep the answer structured, clear, and professional without cutting off.\n\n"
+            f"DOCUMENT CONTEXT:\n{context_str}"
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -1172,7 +1201,11 @@ class RagEngine:
             )
         messages.append({"role": "user", "content": question})
 
-        for token in chat_stream(self.settings, messages, options={"num_predict": 350, "num_ctx": 2048}):
+        for token in chat_stream(
+            self.settings,
+            messages,
+            options={"num_predict": 650, "num_ctx": 3584, "temperature": 0.1},
+        ):
             yield token
 
         return retrieved_chunks
@@ -1203,9 +1236,11 @@ class RagEngine:
             use_llm_reranker=use_llm_reranker,
         )
         tokens = []
+        cited: list[DocumentChunk] = []
         try:
             while True:
                 tokens.append(next(gen))
         except StopIteration as e:
             cited = e.value or []
         return "".join(tokens), cited
+

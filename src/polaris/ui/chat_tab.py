@@ -1,14 +1,15 @@
-"""AI-Powered Search & Document Chatbot tab with real-time token streaming, citation badges, hybrid retrieval, HyDE, and stop generation."""
+"""AI-Powered Search & Document Chatbot tab with Messenger-style conversation stream, real-time token streaming, citation badges, hybrid retrieval, HyDE, and stop generation."""
 from __future__ import annotations
 
-from datetime import datetime
-from pathlib import Path
+import html
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
+from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -225,6 +226,76 @@ class SourceViewerDialog(QDialog):
                 QMessageBox.warning(self, "Folder Not Found", f"Folder does not exist:\n{folder}")
 
 
+def _format_bubble_text(text: str) -> str:
+    """Format markdown-style text into clean HTML for chat bubbles."""
+    if not text:
+        return ""
+
+    escaped = html.escape(text)
+
+    # Multi-line code blocks
+    def _code_block_sub(match):
+        code = match.group(1).strip()
+        return (
+            f'<div style="background-color: #0b1120; border: 1px solid #334155; padding: 8px 12px; '
+            f'border-radius: 6px; color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; '
+            f'margin: 6px 0; white-space: pre-wrap;">{code}</div>'
+        )
+
+    escaped = re.sub(r'```(?:[a-zA-Z0-9_-]*\\n)?([\s\S]*?)```', _code_block_sub, escaped)
+
+    # Inline code
+    escaped = re.sub(
+        r'`([^`]+)`',
+        r'<code style="background-color: #0b1120; padding: 2px 5px; border-radius: 4px; color: #38bdf8; font-family: Consolas, monospace; font-size: 12px;">\1</code>',
+        escaped,
+    )
+
+    # Bold: **text**
+    escaped = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', escaped)
+
+    # Italic: *text*
+    escaped = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', escaped)
+
+    # Format bullet lists, numbered lists, and paragraphs
+    lines = escaped.split("\n")
+    chunks = []
+    current_list_type = None  # None, "ul", "ol"
+    current_list_items = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            if current_list_type != "ul":
+                if current_list_type == "ol":
+                    chunks.append("<ol style='margin: 4px 0; padding-left: 18px;'>" + "".join(current_list_items) + "</ol>")
+                    current_list_items = []
+                current_list_type = "ul"
+            current_list_items.append(f"<li>{stripped[2:]}</li>")
+        elif re.match(r'^\d+\.\s', stripped):
+            if current_list_type != "ol":
+                if current_list_type == "ul":
+                    chunks.append("<ul style='margin: 4px 0; padding-left: 18px;'>" + "".join(current_list_items) + "</ul>")
+                    current_list_items = []
+                current_list_type = "ol"
+            m = re.match(r'^\d+\.\s+(.*)', stripped)
+            current_list_items.append(f"<li>{m.group(1) if m else stripped}</li>")
+        else:
+            if current_list_type:
+                tag = current_list_type
+                chunks.append(f"<{tag} style='margin: 4px 0; padding-left: 18px;'>" + "".join(current_list_items) + f"</{tag}>")
+                current_list_type = None
+                current_list_items = []
+            if line:
+                chunks.append(line)
+
+    if current_list_type:
+        tag = current_list_type
+        chunks.append(f"<{tag} style='margin: 4px 0; padding-left: 18px;'>" + "".join(current_list_items) + f"</{tag}>")
+
+    return "<br>".join(chunks)
+
+
 class IndexWorker(QThread):
     progress = Signal(int, int, str)
     done = Signal(int)
@@ -274,9 +345,11 @@ class StreamQueryWorker(QThread):
         self.use_hyde = use_hyde
         self.use_reranker = use_reranker
         self.is_stopped = False
+        self._stopped = False
 
     def stop(self):
         self.is_stopped = True
+        self._stopped = True
 
     def run(self):
         try:
@@ -302,7 +375,8 @@ class StreamQueryWorker(QThread):
                 cited = e.value or []
             self.done.emit(cited)
         except Exception as e:
-            self.failed.emit(str(e))
+            if not self.is_stopped:
+                self.failed.emit(str(e))
 
 
 class ChatTab(QWidget):
@@ -315,8 +389,10 @@ class ChatTab(QWidget):
         self.index_worker: IndexWorker | None = None
         self.query_worker: StreamQueryWorker | None = None
         self.current_assistant_text: str = ""
+        self.current_question: str = ""
+        self.active_bubble_start_pos: int = 0
+        self.message_count: int = 0
         self.is_streaming_active: bool = False
-        self._assistant_start_pos: int = 0
 
         self._init_ui()
 
@@ -331,11 +407,15 @@ class ChatTab(QWidget):
         self.folder_edit = QLineEdit()
         self.folder_edit.setPlaceholderText("Select folder containing documents you want to search and chat with...")
         self.folder_edit.textChanged.connect(self._on_folder_text_changed)
+        self.folder_edit.textChanged.connect(self._on_folder_changed)
         browse_btn = QPushButton("Browse...")
         browse_btn.clicked.connect(self._browse_folder)
 
         self.index_btn = QPushButton("⚡ Index Folder for AI Search")
-        self.index_btn.setStyleSheet("font-weight: bold; padding: 5px 12px;")
+        self.index_btn.setStyleSheet(
+            "font-weight: bold; padding: 6px 14px; background-color: #1e293b; color: #94a3b8; "
+            "border: 1px solid #334155; border-radius: 6px;"
+        )
         self.index_btn.clicked.connect(lambda: self.start_indexing(force_reindex=False))
 
         folder_row.addWidget(self.folder_edit, 1)
@@ -353,20 +433,16 @@ class ChatTab(QWidget):
 
         layout.addWidget(index_group)
 
-        # 2. Chat history
-        chat_group = QGroupBox("2. Chat with Your Documents (Local Llama 3.2 - Real-Time Streaming)")
+        # 2. Messenger-Style Chat Stream
+        chat_group = QGroupBox("2. Conversation Stream (Local Ollama Llama 3.2)")
         cg_layout = QVBoxLayout(chat_group)
 
         self.chat_browser = QTextBrowser()
         self.chat_browser.setOpenExternalLinks(False)
         self.chat_browser.anchorClicked.connect(self._on_anchor_clicked)
         self.chat_browser.setStyleSheet(
-            "background-color: #0f172a; color: #f8fafc; font-family: Segoe UI, sans-serif; font-size: 13px; padding: 10px;"
-        )
-        self._append_system_msg(
-            "👋 Welcome to <b>Polaris Document Chat</b>!<br>"
-            "Index a folder above, then ask any question about your local files.<br>"
-            "Responses stream in real-time with verified citation badges you can click to inspect."
+            "background-color: #0b1120; color: #f8fafc; font-family: Segoe UI, system-ui, sans-serif; "
+            "font-size: 13px; padding: 12px; border: 1px solid #1e293b; border-radius: 8px;"
         )
         cg_layout.addWidget(self.chat_browser, 1)
 
@@ -427,29 +503,69 @@ class ChatTab(QWidget):
 
         cg_layout.addLayout(filter_row)
 
-        # 4. Input row
-        input_row = QHBoxLayout()
+        # 4. Messenger-Style Input Bar
+        input_container = QWidget()
+        input_layout = QHBoxLayout(input_container)
+        input_layout.setContentsMargins(0, 4, 0, 0)
+
         self.query_edit = QLineEdit()
-        self.query_edit.setPlaceholderText("Ask a question about your files... (e.g. 'What are the main findings in the report?')")
-        self.query_edit.returnPressed.connect(self._on_query_submit)
+        self.query_edit.setPlaceholderText("Type a message... (Press Enter to send)")
+        self.query_edit.setStyleSheet(
+            "background-color: #1e293b; color: white; border: 1px solid #334155; "
+            "border-radius: 8px; padding: 8px 12px; font-size: 13px;"
+        )
+        self.query_edit.returnPressed.connect(self.send_question)
+        input_layout.addWidget(self.query_edit, 1)
 
         self.send_btn = QPushButton("Ask AI")
-        self.send_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 16px;")
-        self.send_btn.clicked.connect(self._on_query_submit)
+        self.send_btn.setStyleSheet(
+            "font-weight: bold; background-color: #2563eb; color: white; padding: 8px 18px; "
+            "border-radius: 8px; min-width: 80px;"
+        )
+        self.send_btn.clicked.connect(self.send_question)
+        input_layout.addWidget(self.send_btn)
 
-        export_btn = QPushButton("📥 Export Chat")
-        export_btn.clicked.connect(self.export_chat)
+        self.stop_btn = QPushButton("⏹ Stop")
+        self.stop_btn.setStyleSheet(
+            "font-weight: bold; background-color: #dc2626; color: white; padding: 8px 14px; "
+            "border-radius: 8px;"
+        )
+        self.stop_btn.clicked.connect(self.stop_streaming)
+        self.stop_btn.hide()
+        input_layout.addWidget(self.stop_btn)
 
-        clear_btn = QPushButton("Clear Chat")
-        clear_btn.clicked.connect(self.clear_chat)
+        self.export_btn = QPushButton("💾 Export")
+        self.export_btn.setToolTip("Export this chat transcript to a Markdown/Text file")
+        self.export_btn.clicked.connect(self.export_chat)
+        input_layout.addWidget(self.export_btn)
 
-        input_row.addWidget(self.query_edit, 1)
-        input_row.addWidget(self.send_btn)
-        input_row.addWidget(export_btn)
-        input_row.addWidget(clear_btn)
-        cg_layout.addLayout(input_row)
+        self.clear_btn = QPushButton("🗑️ Clear")
+        self.clear_btn.setToolTip("Clear session history and start fresh")
+        self.clear_btn.clicked.connect(self.clear_chat)
+        input_layout.addWidget(self.clear_btn)
 
+        cg_layout.addWidget(input_container)
         layout.addWidget(chat_group, 1)
+
+        self._show_welcome_banner()
+
+    def _show_welcome_banner(self):
+        self.chat_browser.clear()
+        time_str = datetime.now().strftime("%I:%M %p")
+        banner_html = f"""
+        <div align="center" style="margin: 14px 0 20px 0;">
+            <div style="background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 14px 20px; display: inline-block; max-width: 85%; text-align: center;">
+                <div style="font-size: 15px; font-weight: bold; color: #38bdf8; margin-bottom: 4px;">💬 Polaris Document Chat</div>
+                <div style="font-size: 12px; color: #cbd5e1; line-height: 1.4;">
+                    Index a folder above, then ask any question about your documents.<br>
+                    Responses stream in real-time with verified citation badges you can click to inspect.
+                </div>
+                <div style="margin-top: 6px; font-size: 10px; color: #64748b;">Session started at {time_str}</div>
+            </div>
+        </div>
+        """
+        self.chat_browser.append(banner_html)
+        self._scroll_to_bottom()
 
     def _get_selected_threshold(self) -> float:
         idx = self.threshold_combo.currentIndex()
@@ -477,6 +593,7 @@ class ChatTab(QWidget):
         return None
 
     def _on_folder_text_changed(self, text: str):
+        """Auto-load cached index when a previously-indexed folder is entered."""
         folder = text.strip()
         if folder and Path(folder).is_dir() and self.engine.has_cache(folder):
             if self.engine.load_cache(folder):
@@ -484,6 +601,24 @@ class ChatTab(QWidget):
                     f"⚡ Cached index loaded instantly: {len(self.engine.chunks)} chunk(s) ready! Click Re-index to scan for edits."
                 )
                 self.index_status.setStyleSheet("color: #16a34a; font-size: 12px; font-weight: bold;")
+
+    def _on_folder_changed(self, text: str):
+        """Style the index button based on folder validity."""
+        folder = text.strip()
+        if folder and Path(folder).is_dir():
+            self.index_btn.setStyleSheet(
+                "font-weight: bold; font-size: 13px; color: #ffffff; background-color: #16a34a; "
+                "border: 2px solid #4ade80; border-radius: 6px; padding: 6px 16px;"
+            )
+        else:
+            self.index_btn.setStyleSheet(
+                "font-weight: bold; padding: 6px 14px; background-color: #1e293b; color: #94a3b8; "
+                "border: 1px solid #334155; border-radius: 6px;"
+            )
+
+    def _scroll_to_bottom(self):
+        sb = self.chat_browser.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def _on_anchor_clicked(self, url: QUrl):
         scheme = url.scheme()
@@ -503,36 +638,10 @@ class ChatTab(QWidget):
         dialog = SourceViewerDialog(self.last_cited_chunks, initial_index=initial_index, parent=self)
         dialog.exec()
 
-    def export_chat(self):
-        if not self.history:
-            QMessageBox.information(self, "Export Chat", "No conversation history to export yet.")
-            return
-
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_filename = f"polaris_chat_export_{timestamp_str}.md"
-
-        out_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Chat Session",
-            default_filename,
-            "Markdown Files (*.md);;Text Files (*.txt);;All Files (*.*)",
-        )
-        if not out_path:
-            return
-
-        try:
-            content = format_chat_export(self.history, include_snippets=True)
-            Path(out_path).write_text(content, encoding="utf-8")
-            self._append_system_msg(f"💾 Chat exported successfully to <code>{Path(out_path).name}</code>")
-            QMessageBox.information(self, "Export Successful", f"Chat saved to:\n{out_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Failed", f"Failed to save chat export: {e}")
-
     def _browse_folder(self):
         f = QFileDialog.getExistingDirectory(self, "Select folder to index")
         if f:
             self.folder_edit.setText(f)
-            self._on_folder_text_changed(f)
 
     def start_indexing(self, force_reindex: bool = False):
         folder = self.folder_edit.text().strip()
@@ -561,6 +670,10 @@ class ChatTab(QWidget):
     def _on_index_done(self, count: int):
         self.progress_bar.hide()
         self.index_btn.setEnabled(True)
+        self.index_btn.setStyleSheet(
+            "font-weight: bold; color: #a7f3d0; background-color: #064e3b; "
+            "border: 1px solid #059669; border-radius: 6px; padding: 6px 14px;"
+        )
         self.index_status.setText(f"✓ Ready: {count} searchable chunk(s) indexed & cached. Ask any question below!")
         self.index_status.setStyleSheet("color: #16a34a; font-size: 12px; font-weight: bold;")
         self._append_system_msg(f"✅ Indexed {count} document chunks from <i>{self.engine.indexed_folder}</i>.")
@@ -568,30 +681,25 @@ class ChatTab(QWidget):
     def _on_index_failed(self, err: str):
         self.progress_bar.hide()
         self.index_btn.setEnabled(True)
+        self._on_folder_changed(self.folder_edit.text())
         self.index_status.setText(f"Indexing failed: {err}")
         self.index_status.setStyleSheet("color: #ef4444; font-size: 12px;")
         QMessageBox.critical(self, "Indexing Error", f"Failed to index documents: {err}")
-
-    def _on_query_submit(self):
-        if self.is_streaming_active:
-            self.stop_generation()
-        else:
-            self.send_question()
 
     def stop_generation(self):
         """Aborts active token streaming immediately."""
         if self.query_worker and self.query_worker.isRunning():
             self.query_worker.stop()
             self._append_system_msg("⏹ Generation stopped by user.")
-        self._reset_input_ui()
-
-    def _reset_input_ui(self):
         self.is_streaming_active = False
+        self.stop_btn.hide()
         self.send_btn.setText("Ask AI")
-        self.send_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 16px;")
-        self.send_btn.setEnabled(True)
+        self.send_btn.show()
         self.query_edit.setEnabled(True)
         self.query_edit.setFocus()
+
+    def stop_streaming(self):
+        self.stop_generation()
 
     def send_question(self):
         query = self.query_edit.text().strip()
@@ -599,26 +707,25 @@ class ChatTab(QWidget):
             return
 
         self.query_edit.clear()
-        self._append_user_msg(query)
-        self.history.append({"role": "user", "content": query})
+        self.current_question = query
+        self.current_assistant_text = ""
+        now_str = datetime.now().strftime("%I:%M %p")
 
+        # 1. Append User Bubble (right-aligned, Messenger style)
+        self._append_user_bubble(query, now_str)
+
+        # 2. Append Assistant Bubble Placeholder (left-aligned, Messenger style)
+        self._insert_assistant_bubble_placeholder(now_str)
+
+        # 3. Update UI states
         self.is_streaming_active = True
         self.send_btn.setText("⏹ Stop")
-        self.send_btn.setStyleSheet("font-weight: bold; background-color: #dc2626; color: white; padding: 6px 16px;")
-        self.send_btn.setEnabled(True)
+        self.send_btn.hide()
+        self.stop_btn.show()
         self.query_edit.setEnabled(False)
-        self.current_assistant_text = ""
+        self._scroll_to_bottom()
 
-        # Prepare assistant bubble
-        cursor = self.chat_browser.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._assistant_start_pos = cursor.position()
-        self.chat_browser.append(
-            '<div style="margin: 8px 0; text-align: left;">'
-            '<div style="background-color: #1e293b; color: #f8fafc; padding: 10px 14px; border-radius: 12px; display: inline-block; max-width: 90%; border: 1px solid #334155;">'
-            '<b style="color: #60a5fa;">Polaris:</b><br><span id="content" style="color: #94a3b8;">thinking...</span></div></div>'
-        )
-
+        # 5. Launch streaming query with full retrieval settings
         file_types = self._get_selected_file_types()
         top_k = self.top_k_spin.value()
         score_threshold = self._get_selected_threshold()
@@ -640,46 +747,60 @@ class ChatTab(QWidget):
         self.query_worker.failed.connect(self._on_stream_failed)
         self.query_worker.start()
 
-    def _on_token(self, token: str):
-        if not self.current_assistant_text:
-            self.current_assistant_text = token
-        else:
-            self.current_assistant_text += token
+    def _append_user_bubble(self, text: str, time_str: str):
+        formatted = _format_bubble_text(text)
+        bubble_html = f"""
+        <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 8px 0;">
+            <tr>
+                <td align="right">
+                    <div style="background-color: #2563eb; color: #ffffff; padding: 10px 16px; border-radius: 16px 16px 4px 16px; display: inline-block; max-width: 80%; font-size: 13px; line-height: 1.4;">
+                        {formatted}
+                    </div>
+                    <div style="color: #64748b; font-size: 10px; margin-top: 3px; margin-right: 4px;">{time_str}</div>
+                </td>
+            </tr>
+        </table>
+        """
+        self.chat_browser.append(bubble_html)
+        self.message_count += 1
+        self._scroll_to_bottom()
 
+    def _insert_assistant_bubble_placeholder(self, time_str: str):
         cursor = self.chat_browser.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertBlock()
+        self.active_bubble_start_pos = cursor.position()
+
+        placeholder_html = f"""
+        <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 8px 0;">
+            <tr>
+                <td align="left">
+                    <div style="color: #38bdf8; font-size: 11px; font-weight: bold; margin-bottom: 3px; margin-left: 4px;">🤖 Polaris AI</div>
+                    <div style="background-color: #1e293b; color: #94a3b8; padding: 10px 16px; border-radius: 16px 16px 16px 4px; display: inline-block; max-width: 85%; font-size: 13px; line-height: 1.5; border: 1px solid #334155;">
+                        <i>Thinking...</i>
+                    </div>
+                    <div style="color: #64748b; font-size: 10px; margin-top: 3px; margin-left: 4px;">{time_str}</div>
+                </td>
+            </tr>
+        </table>
+        """
+        cursor.insertHtml(placeholder_html)
         self.chat_browser.setTextCursor(cursor)
-        self._refresh_latest_assistant_bubble(self.current_assistant_text, cited=[])
+        self.message_count += 1
+        self._scroll_to_bottom()
+
+    def _on_token(self, token: str):
+        self.current_assistant_text += token
+        self._update_active_assistant_bubble(self.current_assistant_text, cited=[], is_final=False)
 
     def _format_markdown_simple(self, text: str, cited: list[DocumentChunk] | None = None) -> str:
         """
-        Renders markdown formatting (bold, headers, bullets, inline citations)
-        into styled HTML for the chat browser.
+        Renders markdown formatting with interactive inline citation badges.
+        Applied on top of _format_bubble_text output for final responses.
         """
-        if not text:
-            return ""
+        formatted = _format_bubble_text(text)
 
-        # Escape HTML entities first
-        escaped = (
-            text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-
-        # 1. Bold: **text** -> <b>text</b>
-        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-
-        # 2. Italic: *text* -> <i>text</i>
-        escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
-
-        # 3. Headers: ### Header -> styled span
-        escaped = re.sub(r"^###\s+(.+)$", r'<b style="font-size: 13px; color: #93c5fd;">\1</b>', escaped, flags=re.MULTILINE)
-        escaped = re.sub(r"^##\s+(.+)$", r'<b style="font-size: 14px; color: #60a5fa;">\1</b>', escaped, flags=re.MULTILINE)
-
-        # 4. Bullet lists: - item or * item
-        escaped = re.sub(r"^[\*\-]\s+(.+)$", r"&bull; \1", escaped, flags=re.MULTILINE)
-
-        # 5. Inline citations: [Source 1], [1], [Source 2] -> interactive links
+        # Inline citations: [Source 1], [1], [Source 2] -> interactive links
         if cited:
             num_cited = len(cited)
             def replace_citation(m: re.Match) -> str:
@@ -693,14 +814,23 @@ class ChatTab(QWidget):
                     )
                 return m.group(0)
 
-            escaped = re.sub(r"\[(?:Source\s*)?(\d+)\]", replace_citation, escaped)
+            formatted = re.sub(r"\[(?:Source\s*)?(\d+)\]", replace_citation, formatted)
 
-        return escaped.replace("\n", "<br>")
+        return formatted
 
-    def _refresh_latest_assistant_bubble(self, text: str, cited: list[DocumentChunk]):
-        formatted_text = self._format_markdown_simple(text, cited=cited)
+    def _format_markdown_with_citations(self, text: str, cited: list[DocumentChunk] | None = None) -> str:
+        return self._format_markdown_simple(text, cited=cited)
+
+    def _update_active_assistant_bubble(self, text: str, cited: list, is_final: bool):
+        now_str = datetime.now().strftime("%I:%M %p")
+
+        if is_final and cited:
+            formatted = self._format_markdown_with_citations(text, cited=cited)
+        else:
+            formatted = _format_bubble_text(text) if text else "<i>Thinking...</i>"
+
         citations_html = ""
-        if cited:
+        if is_final and cited:
             cite_badges = []
             for i, c in enumerate(cited):
                 sec_tag = f" § {c.section}" if getattr(c, "section", "") else ""
@@ -720,25 +850,37 @@ class ChatTab(QWidget):
                 f'</div>'
             )
 
-        html = f"""
-        <div style="margin: 8px 0; text-align: left;">
-            <div style="background-color: #1e293b; color: #f8fafc; padding: 10px 14px; border-radius: 12px; display: inline-block; max-width: 90%; border: 1px solid #334155; line-height: 1.4;">
-                <b style="color: #60a5fa;">Polaris:</b><br>{formatted_text}
-                {citations_html}
-            </div>
-        </div>
+        bubble_html = f"""
+        <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 8px 0;">
+            <tr>
+                <td align="left">
+                    <div style="color: #38bdf8; font-size: 11px; font-weight: bold; margin-bottom: 3px; margin-left: 4px;">🤖 Polaris AI</div>
+                    <div style="background-color: #1e293b; color: #f8fafc; padding: 12px 16px; border-radius: 16px 16px 16px 4px; display: inline-block; max-width: 85%; font-size: 13px; line-height: 1.5; border: 1px solid #334155;">
+                        {formatted}
+                        {citations_html}
+                    </div>
+                    <div style="color: #64748b; font-size: 10px; margin-top: 3px; margin-left: 4px;">{now_str}</div>
+                </td>
+            </tr>
+        </table>
         """
+
+        # Update in-place without touching any previous history messages
         cursor = self.chat_browser.textCursor()
-        cursor.setPosition(self._assistant_start_pos)
-        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
+        cursor.setPosition(self.active_bubble_start_pos)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
-        cursor.insertHtml(html)
-        self.chat_browser.verticalScrollBar().setValue(
-            self.chat_browser.verticalScrollBar().maximum()
-        )
+        cursor.insertHtml(bubble_html)
+        self.chat_browser.setTextCursor(cursor)
+        self._scroll_to_bottom()
 
     def _on_stream_done(self, cited: list):
-        self._reset_input_ui()
+        self.is_streaming_active = False
+        self.stop_btn.hide()
+        self.send_btn.setText("Ask AI")
+        self.send_btn.show()
+        self.query_edit.setEnabled(True)
+        self.query_edit.setFocus()
 
         # Filter and prioritize actively cited chunks if the assistant specifically cited them
         active_indices: list[int] = []
@@ -761,38 +903,85 @@ class ChatTab(QWidget):
             self.inspect_sources_btn.setEnabled(False)
             self.inspect_sources_btn.setText("🔎 Inspect Source Citations")
 
-        self._refresh_latest_assistant_bubble(self.current_assistant_text, cited=final_cited)
-        self.history.append({"role": "assistant", "content": self.current_assistant_text, "cited": final_cited})
+        # Finalize the assistant bubble with complete citations
+        self._update_active_assistant_bubble(self.current_assistant_text, cited=final_cited, is_final=True)
+
+        # Record turn in multi-turn conversation history
+        if not self.history or self.history[-1].get("role") != "user":
+            if self.current_question:
+                self.history.append({"role": "user", "content": self.current_question})
+        asst_entry: dict = {"role": "assistant", "content": self.current_assistant_text}
+        if final_cited:
+            asst_entry["cited"] = final_cited
+        self.history.append(asst_entry)
+        self._scroll_to_bottom()
 
     def _on_stream_failed(self, err: str):
-        self._reset_input_ui()
+        self.is_streaming_active = False
+        self.stop_btn.hide()
+        self.send_btn.setText("Ask AI")
+        self.send_btn.show()
+        self.query_edit.setEnabled(True)
         if self.history and self.history[-1].get("role") == "user":
             self.history.pop()
         self._append_system_msg(f"⚠️ Error: {err}")
+        self._scroll_to_bottom()
 
-    def _append_user_msg(self, text: str):
-        html = f"""
-        <div style="margin: 8px 0; text-align: right;">
-            <span style="background-color: #2563eb; color: white; padding: 6px 12px; border-radius: 12px; display: inline-block;">
-                <b>You:</b> {text}
+    def _append_system_msg(self, text: str):
+        sys_html = f"""
+        <div align="center" style="margin: 8px 0;">
+            <span style="background-color: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 12px; border-radius: 12px; border: 1px solid #334155;">
+                {text}
             </span>
         </div>
         """
-        self.chat_browser.append(html)
+        self.chat_browser.append(sys_html)
+        self._scroll_to_bottom()
 
-    def _append_system_msg(self, text: str):
-        html = f"""
-        <div style="margin: 6px 0; text-align: center; color: #94a3b8; font-size: 12px;">
-            {text}
-        </div>
-        """
-        self.chat_browser.append(html)
+    def _append_user_msg(self, text: str):
+        """Helper for test compatibility."""
+        self._append_user_bubble(text, datetime.now().strftime("%I:%M %p"))
 
     def clear_chat(self):
+        if self.history:
+            confirm = QMessageBox.question(
+                self,
+                "Clear Conversation",
+                "Clear the entire chat session and start a new conversation?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
         self.history.clear()
         self.last_cited_chunks = []
-        self._assistant_start_pos = 0
+        self.active_bubble_start_pos = 0
+        self.message_count = 0
         self.inspect_sources_btn.setEnabled(False)
         self.inspect_sources_btn.setText("🔎 Inspect Source Citations")
-        self.chat_browser.clear()
-        self._append_system_msg("Chat history cleared.")
+        self._show_welcome_banner()
+
+    def export_chat(self):
+        if not self.history:
+            QMessageBox.information(self, "Export Chat", "No conversation history to export yet.")
+            return
+
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"polaris_chat_export_{timestamp_str}.md"
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Chat Session",
+            default_filename,
+            "Markdown Files (*.md);;Text Files (*.txt);;All Files (*.*)",
+        )
+        if not out_path:
+            return
+
+        try:
+            content = format_chat_export(self.history, include_snippets=True)
+            Path(out_path).write_text(content, encoding="utf-8")
+            self._append_system_msg(f"💾 Chat exported successfully to <code>{Path(out_path).name}</code>")
+            QMessageBox.information(self, "Export Successful", f"Chat saved to:\n{out_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to save chat export: {e}")
