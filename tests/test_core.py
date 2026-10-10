@@ -40,10 +40,12 @@ def test_organize_conflict_safe_and_undo(tmp_path):
     conn = connect(tmp_path / "t.db")
     moves = plan_by_type([str(src / "n.txt")], str(out))
     assert moves[0].dst.endswith("n (1).txt")
-    batch = apply_moves(conn, moves)
+    result = apply_moves(conn, moves)
+    assert result.succeeded == 1
+    assert result.failed == 0
     assert (out / "Documents" / "n.txt").read_text() == "existing"   # not overwritten
     assert (out / "Documents" / "n (1).txt").read_text() == "new"
-    assert undo_batch(conn, batch) == (1, 0)
+    assert undo_batch(conn, result.batch_id) == (1, 0)
     assert (src / "n.txt").read_text() == "new"
 
 

@@ -18,19 +18,41 @@ class PlanError(ValueError):
     pass
 
 
-def parse_model_json(text: str) -> dict:
-    """Tolerate code fences / chatter around the JSON; fail safely otherwise."""
-    text = re.sub(r"```(?:json)?", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        raise PlanError("No JSON object in model output")
-    try:
-        obj = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as e:
-        raise PlanError(f"Malformed JSON: {e}") from e
-    if not isinstance(obj, dict):
-        raise PlanError("Plan must be a JSON object")
-    return obj
+def parse_model_json(text: str) -> dict | list:
+    """Tolerate code fences / chatter around the JSON; fail safely otherwise.
+
+    Returns a dict for object responses, or a list for array responses.
+    Both are valid since the AI organizer accepts either shape.
+    """
+    text = re.sub(r"```(?:json)?", "", text).strip()
+
+    # Determine whether the first meaningful character is { or [
+    stripped = text.lstrip()
+    if stripped.startswith("["):
+        # Top-level array
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end <= start:
+            raise PlanError("No JSON array in model output")
+        try:
+            obj = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as e:
+            raise PlanError(f"Malformed JSON: {e}") from e
+        if not isinstance(obj, list):
+            raise PlanError("Expected a JSON array")
+        return obj
+    else:
+        # Top-level object (original behaviour)
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise PlanError("No JSON object in model output")
+        try:
+            obj = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as e:
+            raise PlanError(f"Malformed JSON: {e}") from e
+        if not isinstance(obj, dict):
+            raise PlanError("Plan must be a JSON object")
+        return obj
 
 
 def validate_plan(raw: str | dict, allowed_roots: list[Path], base: Path | None = None) -> dict:
