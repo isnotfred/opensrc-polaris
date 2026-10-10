@@ -65,3 +65,5 @@ ehthumbs.db
 # Logs & Temporary files
 *.log
 tmp/
+brag-output/work/
+
