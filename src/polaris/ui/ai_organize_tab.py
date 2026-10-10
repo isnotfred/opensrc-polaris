@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -25,6 +24,21 @@ from ..config import Settings
 from ..core.organizer import Move, apply_moves, plan_by_type, undo_batch
 from ..ai.ai_organizer import plan_with_ai
 from ..db.database import connect
+from .common.card import CardFrame
+from .common.components import ActionChip
+from .common.styles import (
+    ACCENT_PRIMARY,
+    ACCENT_SUCCESS,
+    BG_CARD,
+    BG_INNER,
+    BORDER_SUBTLE,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    ghost_button_style,
+    primary_button_style,
+    success_button_style,
+)
 
 
 class AIPlanWorker(QThread):
@@ -50,7 +64,7 @@ class AIPlanWorker(QThread):
         try:
             if self.mode == "rule_based" or self.instruction.strip().lower() == "__rule_based__":
                 moves = plan_by_type(self.file_paths, self.dest_dir)
-                strategy_name = "⚡ Fast Rule-based (by Type)"
+                strategy_name = "Fast Rule-based (by Type)"
                 explanation = (
                     "Files were deterministically sorted into standard category folders "
                     "(Documents, Presentations, Spreadsheets, Images, Videos, Audio, Archives, Code) "
@@ -58,14 +72,14 @@ class AIPlanWorker(QThread):
                 )
             elif self.mode == "smart_ai" or not self.instruction.strip():
                 moves = plan_with_ai(self.file_paths, self.dest_dir, "", self.settings)
-                strategy_name = "🧠 Smart Auto-Organize (Autonomous AI Logic)"
+                strategy_name = "Smart Auto-Organize (Autonomous AI Logic)"
                 explanation = (
-                    "Files were analyzed by Ollama Llama 3.2 and automatically organized into logical subfolders "
+                    "Files were analyzed by Ollama and automatically organized into logical subfolders "
                     "based on detected project names, topics, file types, and contents."
                 )
             else:
                 moves = plan_with_ai(self.file_paths, self.dest_dir, self.instruction, self.settings)
-                strategy_name = f'✨ Custom Instructions: "{self.instruction.strip()}"'
+                strategy_name = f'Custom Instructions: "{self.instruction.strip()}"'
                 norm = self.instruction.lower().strip()
                 if "size" in norm and any(k in norm for k in ["type", "ext", "format", "kind"]):
                     explanation = (
@@ -89,7 +103,7 @@ class AIPlanWorker(QThread):
                     )
                 else:
                     explanation = (
-                        f"Files were evaluated with Ollama Llama 3.2 and organized "
+                        f"Files were evaluated with Ollama and organized "
                         f"adhering strictly to your custom instruction: '{self.instruction.strip()}'."
                     )
 
@@ -154,99 +168,91 @@ class AIOrganizeTab(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
-        # 1. Target Folder
-        folder_group = QGroupBox("1. Target Folder & Files")
-        fg_layout = QVBoxLayout(folder_group)
+        # ── Card 1: Setup & Instructions ──────────────────────────────────────
+        self.setup_card = CardFrame(
+            "Folder & Organization Rules",
+            subtitle="Select the directory and choose how files should be sorted",
+        )
 
+        # Source folder row
         src_row = QHBoxLayout()
-        src_label = QLabel("Folder:")
+        src_row.setSpacing(8)
         self.src_edit = QLineEdit()
-        self.src_edit.setPlaceholderText("Select the folder containing files you want to organize...")
+        self.src_edit.setPlaceholderText("Select directory to organize...")
         src_btn = QPushButton("Browse...")
         src_btn.clicked.connect(self._browse_source)
-        src_row.addWidget(src_label)
+        self.subfolders_check = QCheckBox("Include subfolders (recursive)")
+
         src_row.addWidget(self.src_edit, 1)
         src_row.addWidget(src_btn)
+        src_row.addWidget(self.subfolders_check)
+        self.setup_card.content_layout.addLayout(src_row)
 
-        opts_row = QHBoxLayout()
-        self.subfolders_check = QCheckBox("Include subfolders (recursive)")
-        opts_row.addWidget(self.subfolders_check)
-        opts_row.addStretch()
-
-        fg_layout.addLayout(src_row)
-        fg_layout.addLayout(opts_row)
-        layout.addWidget(folder_group)
-
-        # 2. AI Instructions & Strategy Modes
-        ai_group = QGroupBox("2. Organization Instructions & Strategy Modes")
-        ai_layout = QVBoxLayout(ai_group)
-
-        self.instruction_edit = QLineEdit()
-        self.instruction_edit.setPlaceholderText(
-            "e.g. 'sort by file type, then size', 'group invoices by client', or click a preset..."
-        )
-        ai_layout.addWidget(self.instruction_edit)
-
-        # Quick Presets Row
+        # Preset Chips Row
         preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel("Quick Presets:"))
+        preset_row.setSpacing(6)
+        presets_label = QLabel("Presets:")
+        presets_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        preset_row.addWidget(presets_label)
 
-        p_type_size = QPushButton("📁 Sort by Type, then Size")
+        p_type_size = ActionChip("By Type, Then Size")
         p_type_size.clicked.connect(lambda: self.instruction_edit.setText("Sort by file type, then size (Small under 1MB, Medium 1MB-50MB, Large over 50MB)"))
         preset_row.addWidget(p_type_size)
 
-        p_size_only = QPushButton("📊 Sort by Size Brackets")
+        p_size_only = ActionChip("By Size Brackets")
         p_size_only.clicked.connect(lambda: self.instruction_edit.setText("Group into size categories: Small (under 1MB), Medium (1MB-50MB), Large (over 50MB)"))
         preset_row.addWidget(p_size_only)
 
-        p_smart = QPushButton("⚡ Smart Auto-Group")
+        p_smart = ActionChip("Smart Auto-Group")
         p_smart.clicked.connect(lambda: self.instruction_edit.setText("Group into logical folders based on project, topic, and file contents"))
         preset_row.addWidget(p_smart)
 
-        p_date = QPushButton("📅 Sort by Year & Date")
+        p_date = ActionChip("By Year & Date")
         p_date.clicked.connect(lambda: self.instruction_edit.setText("Group files by their relevant year or date"))
         preset_row.addWidget(p_date)
 
-        p_proj = QPushButton("🏢 Sort by Project / Client")
+        p_proj = ActionChip("By Project / Client")
         p_proj.clicked.connect(lambda: self.instruction_edit.setText("Identify project names or clients and group corresponding files"))
         preset_row.addWidget(p_proj)
 
         preset_row.addStretch()
-        ai_layout.addLayout(preset_row)
+        self.setup_card.content_layout.addLayout(preset_row)
 
-        # Action Buttons Row
-        action_row = QHBoxLayout()
-        action_row.addWidget(QLabel("Plan Method:"))
+        # Instructions & Execution Row
+        exec_row = QHBoxLayout()
+        exec_row.setSpacing(8)
 
-        # Button 1: Adhere strictly to user's entered instructions
-        self.ai_custom_btn = QPushButton("✨ Plan with Custom Instructions")
-        self.ai_custom_btn.setStyleSheet("font-weight: bold; background-color: #2563eb; color: white; padding: 6px 14px; border-radius: 4px;")
-        self.ai_custom_btn.setToolTip("Strictly executes the instructions typed into the box above using Ollama AI.")
+        self.instruction_edit = QLineEdit()
+        self.instruction_edit.setPlaceholderText(
+            "Enter custom sorting instructions or click a preset above..."
+        )
+        exec_row.addWidget(self.instruction_edit, 1)
+
+        self.ai_custom_btn = QPushButton("Plan with Custom Instructions")
+        self.ai_custom_btn.setStyleSheet(primary_button_style())
+        self.ai_custom_btn.setToolTip("Executes custom instructions with Ollama AI.")
         self.ai_custom_btn.clicked.connect(lambda: self.generate_plan(mode="custom"))
-        action_row.addWidget(self.ai_custom_btn)
+        exec_row.addWidget(self.ai_custom_btn)
 
-        # Alias for backward compatibility
-        self.ai_plan_btn = self.ai_custom_btn
+        self.ai_plan_btn = self.ai_custom_btn  # Compatibility alias
 
-        # Button 2: Autonomous AI Logic
-        self.ai_smart_btn = QPushButton("🧠 Smart Auto-Organize (AI Logic)")
-        self.ai_smart_btn.setStyleSheet("font-weight: bold; background-color: #059669; color: white; padding: 6px 14px; border-radius: 4px;")
-        self.ai_smart_btn.setToolTip("Uses AI's own autonomous logic to categorize files by topic, project, and type without custom text.")
+        self.ai_smart_btn = QPushButton("Smart Auto-Organize")
+        self.ai_smart_btn.setStyleSheet(ghost_button_style())
+        self.ai_smart_btn.setToolTip("Autonomous AI grouping without custom instructions.")
         self.ai_smart_btn.clicked.connect(lambda: self.generate_plan(mode="smart_ai"))
-        action_row.addWidget(self.ai_smart_btn)
+        exec_row.addWidget(self.ai_smart_btn)
 
-        # Button 3: Deterministic Rule-based
-        self.fast_plan_btn = QPushButton("⚡ Fast Rule-based (by Type)")
-        self.fast_plan_btn.setStyleSheet("font-weight: bold; padding: 6px 12px;")
-        self.fast_plan_btn.setToolTip("Instantly organizes files into standard format categories (Documents, Images, Code, etc.) without calling AI.")
+        self.fast_plan_btn = QPushButton("Fast Rule-based (by Type)")
+        self.fast_plan_btn.setStyleSheet(ghost_button_style())
+        self.fast_plan_btn.setToolTip("Deterministic instant sorting by file extension without AI.")
         self.fast_plan_btn.clicked.connect(lambda: self.generate_plan(mode="rule_based"))
-        action_row.addWidget(self.fast_plan_btn)
+        exec_row.addWidget(self.fast_plan_btn)
 
-        action_row.addStretch()
-        ai_layout.addLayout(action_row)
-
-        layout.addWidget(ai_group)
+        self.setup_card.content_layout.addLayout(exec_row)
+        layout.addWidget(self.setup_card)
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -254,39 +260,60 @@ class AIOrganizeTab(QWidget):
         self.progress_bar.hide()
         layout.addWidget(self.progress_bar)
 
-        # 3. Preview Table & Selection
-        table_group = QGroupBox("3. Proposed Moves (Preview)")
-        tg_layout = QVBoxLayout(table_group)
+        # ── Card 2: Operations & Preview ──────────────────────────────────────
+        card_header_action = QWidget()
+        cha_layout = QHBoxLayout(card_header_action)
+        cha_layout.setContentsMargins(0, 0, 0, 0)
+        cha_layout.setSpacing(6)
 
-        # Active Strategy & Reasoning Banner
-        self.strategy_banner = QGroupBox("Active Strategy & AI Rationale")
+        quick_undo_btn = QPushButton("Undo Last Batch")
+        quick_undo_btn.setStyleSheet(ghost_button_style())
+        quick_undo_btn.clicked.connect(self.undo_selected_batch)
+        cha_layout.addWidget(quick_undo_btn)
+
+        self.table_card = CardFrame(
+            "Proposed Operations",
+            subtitle="Review operations before applying changes to disk",
+            header_action=card_header_action,
+        )
+
+        # Strategy & Rationale strip
+        self.strategy_banner = QWidget()
         sb_layout = QVBoxLayout(self.strategy_banner)
-        sb_layout.setContentsMargins(10, 8, 10, 8)
+        sb_layout.setContentsMargins(0, 0, 0, 0)
+        sb_layout.setSpacing(2)
 
-        self.strategy_title_label = QLabel("📌 Strategy: Ready to plan")
-        self.strategy_title_label.setStyleSheet("font-weight: bold; color: #38bdf8;")
-        self.strategy_desc_label = QLabel("💡 How & Why It Sorted: Choose an organization method above to preview.")
+        self.strategy_title_label = QLabel("Strategy: Ready to plan")
+        self.strategy_title_label.setStyleSheet("font-weight: 600; color: #58a6ff; font-size: 12px;")
+        self.strategy_desc_label = QLabel("Rationale: Choose an organization method above to preview.")
         self.strategy_desc_label.setWordWrap(True)
+        self.strategy_desc_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
         self.strategy_folders_label = QLabel("")
-        self.strategy_folders_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.strategy_folders_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
 
         sb_layout.addWidget(self.strategy_title_label)
         sb_layout.addWidget(self.strategy_desc_label)
         sb_layout.addWidget(self.strategy_folders_label)
-        tg_layout.addWidget(self.strategy_banner)
+        self.table_card.content_layout.addWidget(self.strategy_banner)
 
+        # Selection and Count Row
         sel_row = QHBoxLayout()
+        sel_row.setSpacing(6)
         sel_all_btn = QPushButton("Select All")
+        sel_all_btn.setStyleSheet(ghost_button_style())
         sel_all_btn.clicked.connect(lambda: self._set_all_checked(True))
         sel_none_btn = QPushButton("Select None")
+        sel_none_btn.setStyleSheet(ghost_button_style())
         sel_none_btn.clicked.connect(lambda: self._set_all_checked(False))
         self.count_label = QLabel("No preview generated.")
+        self.count_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
 
         sel_row.addWidget(sel_all_btn)
         sel_row.addWidget(sel_none_btn)
         sel_row.addWidget(self.count_label, 1)
-        tg_layout.addLayout(sel_row)
+        self.table_card.content_layout.addLayout(sel_row)
 
+        # Moves Table
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels([
             "Apply", "File", "Proposed Destination", "AI Reason", "Original Path"
@@ -296,40 +323,43 @@ class AIOrganizeTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        tg_layout.addWidget(self.table)
+        self.table_card.content_layout.addWidget(self.table, 1)
 
-        apply_row = QHBoxLayout()
+        # Footer Row (Apply action on left, SQLite history & undo on right)
+        footer_row = QHBoxLayout()
+        footer_row.setSpacing(8)
+
         self.apply_btn = QPushButton("Apply Selected Moves")
         self.apply_btn.setEnabled(False)
-        self.apply_btn.setStyleSheet("font-weight: bold; padding: 6px 14px;")
+        self.apply_btn.setStyleSheet(success_button_style())
         self.apply_btn.clicked.connect(self.apply_selected)
+        footer_row.addWidget(self.apply_btn)
 
         self.status_label = QLabel("")
-        apply_row.addWidget(self.apply_btn)
-        apply_row.addWidget(self.status_label, 1)
-        tg_layout.addLayout(apply_row)
+        self.status_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        footer_row.addWidget(self.status_label, 1)
 
-        layout.addWidget(table_group, 1)
+        # Ledger history integration
+        hist_label = QLabel("Recent Batches:")
+        hist_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        footer_row.addWidget(hist_label)
 
-        # 4. History & Undo
-        history_group = QGroupBox("History & Undo")
-        hg_layout = QHBoxLayout(history_group)
-
-        hg_layout.addWidget(QLabel("Recent Batches:"))
         self.batch_combo = QComboBox()
-        self.batch_combo.setMinimumWidth(260)
-        hg_layout.addWidget(self.batch_combo)
+        self.batch_combo.setMinimumWidth(220)
+        footer_row.addWidget(self.batch_combo)
 
-        self.undo_btn = QPushButton("Undo Selected Batch")
+        self.undo_btn = QPushButton("Undo Selected")
+        self.undo_btn.setStyleSheet(ghost_button_style())
         self.undo_btn.clicked.connect(self.undo_selected_batch)
-        hg_layout.addWidget(self.undo_btn)
+        footer_row.addWidget(self.undo_btn)
 
-        refresh_btn = QPushButton("Refresh History")
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setStyleSheet(ghost_button_style())
         refresh_btn.clicked.connect(self.refresh_history)
-        hg_layout.addWidget(refresh_btn)
-        hg_layout.addStretch()
+        footer_row.addWidget(refresh_btn)
 
-        layout.addWidget(history_group)
+        self.table_card.content_layout.addLayout(footer_row)
+        layout.addWidget(self.table_card, 1)
 
     def _browse_source(self):
         folder = QFileDialog.getExistingDirectory(self, "Select folder to organize")
@@ -351,8 +381,8 @@ class AIOrganizeTab(QWidget):
                 self,
                 "Custom Instruction Needed",
                 "Please enter your custom sort instructions in the text box (e.g. 'sort by file type, then size') "
-                "or click one of the Quick Presets.\n\n"
-                "To organize automatically without typing instructions, click '🧠 Smart Auto-Organize (AI Logic)'.",
+                "or click one of the Presets.\n\n"
+                "To organize automatically without typing instructions, click 'Smart Auto-Organize'.",
             )
             self.instruction_edit.setFocus()
             return
@@ -408,10 +438,9 @@ class AIOrganizeTab(QWidget):
         self.last_strategy_name = strategy_name
         self.last_explanation = explanation
 
-        self.strategy_title_label.setText(f"📌 Active Strategy: {strategy_name}")
-        self.strategy_desc_label.setText(f"💡 Rationale: {explanation}")
+        self.strategy_title_label.setText(f"Strategy: {strategy_name}")
+        self.strategy_desc_label.setText(f"Rationale: {explanation}")
 
-        # Compute destination folder breakdown
         root_str = self.src_edit.text().strip()
         root = Path(root_str) if root_str else None
         counts: dict[str, int] = {}
@@ -433,7 +462,7 @@ class AIOrganizeTab(QWidget):
         summary_items = [f"{k} ({v})" for k, v in sorted(counts.items())]
         if summary_items:
             self.strategy_folders_label.setText(
-                f"📁 Destination Folders ({len(counts)}): {', '.join(summary_items[:5])}{'...' if len(counts) > 5 else ''}"
+                f"Destination Folders ({len(counts)}): {', '.join(summary_items[:5])}{'...' if len(counts) > 5 else ''}"
             )
         else:
             self.strategy_folders_label.setText("")
@@ -466,7 +495,7 @@ class AIOrganizeTab(QWidget):
 
         total = len(moves)
         self.count_label.setText(f"{total} proposed move(s).")
-        self.status_label.setText(f"Preview ready: {total} files planned under {strategy_name}.")
+        self.status_label.setText(f"Preview ready: {total} files planned.")
         self.apply_btn.setEnabled(total > 0)
 
     def _plan_failed(self, err: str):
@@ -526,7 +555,6 @@ class AIOrganizeTab(QWidget):
         self.ai_smart_btn.setEnabled(True)
         self.fast_plan_btn.setEnabled(True)
 
-        # Build bulleted list of destination folders for selected moves
         root_str = self.src_edit.text().strip()
         root = Path(root_str) if root_str else None
         counts: dict[str, int] = {}
@@ -555,13 +583,13 @@ class AIOrganizeTab(QWidget):
         dialog_msg = (
             f"Successfully organized {count} file(s)!\n"
             f"Batch ID: {batch_id}\n\n"
-            f"📋 Strategy Applied:\n{strategy_name}\n\n"
-            f"💡 Reason & How It Sorted:\n{explanation}\n\n"
-            f"📁 Destination Folders Created:\n{folder_lines}\n\n"
-            f"⏪ Undo Available:\nYou can undo this batch at any time using the History & Undo section below."
+            f"Strategy Applied:\n{strategy_name}\n\n"
+            f"Reason & How It Sorted:\n{explanation}\n\n"
+            f"Destination Folders Created:\n{folder_lines}\n\n"
+            f"Undo Available:\nYou can undo this batch at any time using the Recent Batches controls."
         )
 
-        self.status_label.setText(f"Done! Moved {count} file(s) using {strategy_name}. Batch ID: {batch_id}")
+        self.status_label.setText(f"Done! Moved {count} file(s). Batch ID: {batch_id}")
         QMessageBox.information(self, "Organization Complete", dialog_msg)
         self.refresh_history()
         self.generate_plan(mode=self.last_mode)

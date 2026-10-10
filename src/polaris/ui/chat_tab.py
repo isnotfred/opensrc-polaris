@@ -1,4 +1,4 @@
-"""AI-Powered Search & Document Chatbot tab with Messenger-style conversation stream and real-time token streaming."""
+"""AI-Powered Search & Document Chatbot tab with grounded citations and real-time streaming."""
 from __future__ import annotations
 
 import html
@@ -9,7 +9,6 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -23,6 +22,21 @@ from PySide6.QtWidgets import (
 
 from ..config import Settings
 from ..ai.rag import RagEngine
+from .common.card import CardFrame
+from .common.components import ActionChip
+from .common.styles import (
+    ACCENT_PRIMARY,
+    ACCENT_SUCCESS,
+    BG_CARD,
+    BG_INNER,
+    BORDER_SUBTLE,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    danger_button_style,
+    ghost_button_style,
+    primary_button_style,
+)
 
 
 def _format_bubble_text(text: str) -> str:
@@ -36,7 +50,7 @@ def _format_bubble_text(text: str) -> str:
     def _code_block_sub(match):
         code = match.group(1).strip()
         return (
-            f'<div style="background-color: #0b1120; border: 1px solid #334155; padding: 8px 12px; '
+            f'<div style="background-color: #0d1117; border: 1px solid #30363d; padding: 8px 12px; '
             f'border-radius: 6px; color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; '
             f'margin: 6px 0; white-space: pre-wrap;">{code}</div>'
         )
@@ -46,7 +60,7 @@ def _format_bubble_text(text: str) -> str:
     # Inline code
     escaped = re.sub(
         r'`([^`]+)`',
-        r'<code style="background-color: #0b1120; padding: 2px 5px; border-radius: 4px; color: #38bdf8; font-family: Consolas, monospace; font-size: 12px;">\1</code>',
+        r'<code style="background-color: #0d1117; padding: 2px 5px; border-radius: 4px; color: #58a6ff; font-family: Consolas, monospace; font-size: 12px;">\1</code>',
         escaped,
     )
 
@@ -56,10 +70,10 @@ def _format_bubble_text(text: str) -> str:
     # Italic: *text*
     escaped = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', escaped)
 
-    # Format bullet lists, numbered lists, and paragraphs
+    # Format lists and paragraphs
     lines = escaped.split("\n")
     chunks = []
-    current_list_type = None  # None, "ul", "ol"
+    current_list_type = None
     current_list_items = []
 
     for line in lines:
@@ -164,110 +178,153 @@ class ChatTab(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
-        # 1. Folder indexing
-        index_group = QGroupBox("1. Document Source Folder (PDF, DOCX, TXT, MD, Code)")
-        ig_layout = QVBoxLayout(index_group)
+        # ── Card 1: Document Source & Status ──────────────────────────────────
+        self.source_card = CardFrame(
+            "Document Source",
+            subtitle="Select directory containing PDFs, Word documents, text, or source code",
+        )
 
         folder_row = QHBoxLayout()
+        folder_row.setSpacing(8)
         self.folder_edit = QLineEdit()
-        self.folder_edit.setPlaceholderText("Select folder containing documents you want to search and chat with...")
+        self.folder_edit.setPlaceholderText("Select directory to index...")
         self.folder_edit.textChanged.connect(self._on_folder_changed)
         browse_btn = QPushButton("Browse...")
         browse_btn.clicked.connect(self._browse_folder)
 
+        # Button preserves exact label and style tokens required by tests
         self.index_btn = QPushButton("⚡ Index Folder for AI Search")
         self.index_btn.setStyleSheet(
-            "font-weight: bold; padding: 6px 14px; background-color: #1e293b; color: #94a3b8; "
-            "border: 1px solid #334155; border-radius: 6px;"
+            "font-weight: 600; padding: 6px 14px; background-color: #21262d; color: #8b949e; "
+            "border: 1px solid #30363d; border-radius: 6px;"
         )
         self.index_btn.clicked.connect(self.start_indexing)
 
         folder_row.addWidget(self.folder_edit, 1)
         folder_row.addWidget(browse_btn)
         folder_row.addWidget(self.index_btn)
-        ig_layout.addLayout(folder_row)
+        self.source_card.content_layout.addLayout(folder_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.hide()
-        ig_layout.addWidget(self.progress_bar)
+        self.source_card.content_layout.addWidget(self.progress_bar)
 
         self.index_status = QLabel("No folder indexed yet. Index a folder to enable semantic search & grounded Q&A.")
-        self.index_status.setStyleSheet("color: #64748b; font-size: 12px;")
-        ig_layout.addWidget(self.index_status)
+        self.index_status.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.source_card.content_layout.addWidget(self.index_status)
 
-        layout.addWidget(index_group)
+        layout.addWidget(self.source_card)
 
-        # 2. Messenger-Style Chat Stream
-        chat_group = QGroupBox("2. Conversation Stream (Local Ollama Llama 3.2)")
-        cg_layout = QVBoxLayout(chat_group)
+        # ── Card 2: Document Chat (Conversation Stream) ───────────────────────
+        header_actions = QWidget()
+        ha_layout = QHBoxLayout(header_actions)
+        ha_layout.setContentsMargins(0, 0, 0, 0)
+        ha_layout.setSpacing(6)
+
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setStyleSheet(ghost_button_style())
+        self.export_btn.setToolTip("Export this chat transcript to a Markdown/Text file")
+        self.export_btn.clicked.connect(self.export_chat)
+        ha_layout.addWidget(self.export_btn)
+
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setStyleSheet(ghost_button_style())
+        self.clear_btn.setToolTip("Clear session history and start fresh")
+        self.clear_btn.clicked.connect(self.clear_chat)
+        ha_layout.addWidget(self.clear_btn)
+
+        self.chat_card = CardFrame(
+            "Polaris Document Chat",
+            subtitle="Answers are grounded in local files with verifiable page citations",
+            header_action=header_actions,
+        )
 
         self.chat_browser = QTextBrowser()
         self.chat_browser.setOpenExternalLinks(False)
         self.chat_browser.setStyleSheet(
-            "background-color: #0b1120; color: #f8fafc; font-family: Segoe UI, system-ui, sans-serif; "
-            "font-size: 13px; padding: 12px; border: 1px solid #1e293b; border-radius: 8px;"
+            f"background-color: {BG_INNER}; color: {TEXT_PRIMARY}; "
+            f"font-family: 'Segoe UI', system-ui, sans-serif; "
+            f"font-size: 13px; padding: 12px; border: 1px solid {BORDER_SUBTLE}; border-radius: 6px;"
         )
-        cg_layout.addWidget(self.chat_browser, 1)
+        self.chat_card.content_layout.addWidget(self.chat_browser, 1)
 
-        # 3. Messenger-Style Input Bar
+        # Suggested Prompt Starter Chips
+        self.starters_container = QWidget()
+        sc_layout = QHBoxLayout(self.starters_container)
+        sc_layout.setContentsMargins(0, 0, 0, 0)
+        sc_layout.setSpacing(6)
+
+        starters_lbl = QLabel("Suggested:")
+        starters_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        sc_layout.addWidget(starters_lbl)
+
+        s1 = ActionChip("What was the total revenue in the report?")
+        s1.clicked.connect(lambda: self._set_starter_prompt("What was the total revenue in the report?"))
+        sc_layout.addWidget(s1)
+
+        s2 = ActionChip("Summarize deliverables and deadlines")
+        s2.clicked.connect(lambda: self._set_starter_prompt("Summarize the key deliverables and deadlines"))
+        sc_layout.addWidget(s2)
+
+        s3 = ActionChip("List mentioned invoices & figures")
+        s3.clicked.connect(lambda: self._set_starter_prompt("List all mentioned invoices, amounts, and figures"))
+        sc_layout.addWidget(s3)
+
+        sc_layout.addStretch()
+        self.chat_card.content_layout.addWidget(self.starters_container)
+
+        # Input Row
         input_container = QWidget()
         input_layout = QHBoxLayout(input_container)
-        input_layout.setContentsMargins(0, 4, 0, 0)
+        input_layout.setContentsMargins(0, 2, 0, 0)
+        input_layout.setSpacing(8)
 
         self.query_edit = QLineEdit()
-        self.query_edit.setPlaceholderText("Type a message... (Press Enter to send)")
-        self.query_edit.setStyleSheet(
-            "background-color: #1e293b; color: white; border: 1px solid #334155; "
-            "border-radius: 8px; padding: 8px 12px; font-size: 13px;"
-        )
+        self.query_edit.setPlaceholderText("Ask a question about your documents... (Enter to send)")
         self.query_edit.returnPressed.connect(self.send_question)
         input_layout.addWidget(self.query_edit, 1)
 
-        self.send_btn = QPushButton("➤ Send")
-        self.send_btn.setStyleSheet(
-            "font-weight: bold; background-color: #2563eb; color: white; padding: 8px 18px; "
-            "border-radius: 8px; min-width: 80px;"
-        )
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setStyleSheet(primary_button_style())
         self.send_btn.clicked.connect(self.send_question)
         input_layout.addWidget(self.send_btn)
 
-        self.stop_btn = QPushButton("⏹ Stop")
-        self.stop_btn.setStyleSheet(
-            "font-weight: bold; background-color: #dc2626; color: white; padding: 8px 14px; "
-            "border-radius: 8px;"
-        )
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setStyleSheet(danger_button_style())
         self.stop_btn.clicked.connect(self.stop_streaming)
         self.stop_btn.hide()
         input_layout.addWidget(self.stop_btn)
 
-        self.export_btn = QPushButton("💾 Export")
-        self.export_btn.setToolTip("Export this chat transcript to a Markdown/Text file")
-        self.export_btn.clicked.connect(self.export_chat)
-        input_layout.addWidget(self.export_btn)
-
-        self.clear_btn = QPushButton("🗑️ Clear")
-        self.clear_btn.setToolTip("Clear session history and start fresh")
-        self.clear_btn.clicked.connect(self.clear_chat)
-        input_layout.addWidget(self.clear_btn)
-
-        cg_layout.addWidget(input_container)
-        layout.addWidget(chat_group, 1)
+        self.chat_card.content_layout.addWidget(input_container)
+        layout.addWidget(self.chat_card, 1)
 
         self._show_welcome_banner()
+
+    def _set_starter_prompt(self, text: str):
+        self.query_edit.setText(text)
+        self.query_edit.setFocus()
 
     def _show_welcome_banner(self):
         self.chat_browser.clear()
         time_str = datetime.now().strftime("%I:%M %p")
         html = f"""
-        <div align="center" style="margin: 14px 0 20px 0;">
-            <div style="background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 14px 20px; display: inline-block; max-width: 85%; text-align: center;">
-                <div style="font-size: 15px; font-weight: bold; color: #38bdf8; margin-bottom: 4px;">💬 Polaris Document Chat</div>
-                <div style="font-size: 12px; color: #cbd5e1; line-height: 1.4;">
-                    Index a folder above, then ask any question about your documents.
-                </div>
-                <div style="margin-top: 6px; font-size: 10px; color: #64748b;">Session started at {time_str}</div>
-            </div>
+        <div align="center" style="margin: 16px 0 20px 0;">
+            <table cellpadding="14" cellspacing="0" style="background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; max-width: 600px;">
+                <tr>
+                    <td align="center">
+                        <div style="font-size: 14px; font-weight: 600; color: #58a6ff; margin-bottom: 4px;">Polaris Document Chat</div>
+                        <div style="font-size: 12px; color: #8b949e; line-height: 1.4;">
+                            Select a folder above, click <b>Index Folder</b>, and ask questions grounded directly in your files.
+                        </div>
+                        <div style="margin-top: 8px; font-size: 10px; color: #6e7681;">
+                            Session initialized at {time_str} · FAISS Local Vector Store
+                        </div>
+                    </td>
+                </tr>
+            </table>
         </div>
         """
         self.chat_browser.append(html)
@@ -276,15 +333,15 @@ class ChatTab(QWidget):
     def _on_folder_changed(self, text: str):
         folder = text.strip()
         if folder and Path(folder).is_dir():
-            # Bold glowing green style to indicate it MUST be clicked
+            # Glowing green state required by tests
             self.index_btn.setStyleSheet(
                 "font-weight: bold; font-size: 13px; color: #ffffff; background-color: #16a34a; "
                 "border: 2px solid #4ade80; border-radius: 6px; padding: 6px 16px;"
             )
         else:
             self.index_btn.setStyleSheet(
-                "font-weight: bold; padding: 6px 14px; background-color: #1e293b; color: #94a3b8; "
-                "border: 1px solid #334155; border-radius: 6px;"
+                "font-weight: 600; padding: 6px 14px; background-color: #21262d; color: #8b949e; "
+                "border: 1px solid #30363d; border-radius: 6px;"
             )
 
     def _scroll_to_bottom(self):
@@ -323,11 +380,11 @@ class ChatTab(QWidget):
         self.progress_bar.hide()
         self.index_btn.setEnabled(True)
         self.index_btn.setStyleSheet(
-            "font-weight: bold; color: #a7f3d0; background-color: #064e3b; "
-            "border: 1px solid #059669; border-radius: 6px; padding: 6px 14px;"
+            "font-weight: 600; color: #ffffff; background-color: #238636; "
+            "border: 1px solid #2ea043; border-radius: 6px; padding: 6px 14px;"
         )
-        self.index_status.setText(f"✓ Ready: Indexed {count} searchable chunk(s). Ask any question below!")
-        self._append_system_msg(f"✅ Indexed {count} document chunks from <i>{self.engine.indexed_folder}</i>.")
+        self.index_status.setText(f"●  Ready: Indexed {count} searchable chunk(s). Ask any question below!")
+        self._append_system_msg(f"Indexed {count} document chunks from <i>{self.engine.indexed_folder}</i>.")
 
     def _on_index_failed(self, err: str):
         self.progress_bar.hide()
@@ -346,10 +403,10 @@ class ChatTab(QWidget):
         self.current_assistant_text = ""
         now_str = datetime.now().strftime("%I:%M %p")
 
-        # 1. Append User Bubble (right-aligned, Messenger style)
+        # 1. Append User Bubble (right-aligned, compact width)
         self._append_user_bubble(query, now_str)
 
-        # 2. Append Assistant Bubble Placeholder (left-aligned, Messenger style)
+        # 2. Append Assistant Bubble Placeholder (left-aligned)
         self._insert_assistant_bubble_placeholder(now_str)
 
         # 3. Update UI states
@@ -371,14 +428,19 @@ class ChatTab(QWidget):
 
     def _append_user_bubble(self, text: str, time_str: str):
         formatted = _format_bubble_text(text)
+        # Using inner table align="right" ensures Qt sizes the bubble tightly to the text instead of 100% width!
         html = f"""
         <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 8px 0;">
             <tr>
                 <td align="right">
-                    <div style="background-color: #2563eb; color: #ffffff; padding: 10px 16px; border-radius: 16px 16px 4px 16px; display: inline-block; max-width: 80%; font-size: 13px; line-height: 1.4;">
-                        {formatted}
-                    </div>
-                    <div style="color: #64748b; font-size: 10px; margin-top: 3px; margin-right: 4px;">{time_str}</div>
+                    <table border="0" cellpadding="8" cellspacing="0" style="background-color: #2563eb; border-radius: 12px; margin-left: 80px;">
+                        <tr>
+                            <td style="color: #ffffff; font-size: 13px; font-family: 'Segoe UI', sans-serif; line-height: 1.4;">
+                                {formatted}
+                            </td>
+                        </tr>
+                    </table>
+                    <div style="color: #6e7681; font-size: 10px; margin-top: 2px; margin-right: 4px;">{time_str}</div>
                 </td>
             </tr>
         </table>
@@ -397,11 +459,15 @@ class ChatTab(QWidget):
         <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 8px 0;">
             <tr>
                 <td align="left">
-                    <div style="color: #38bdf8; font-size: 11px; font-weight: bold; margin-bottom: 3px; margin-left: 4px;">🤖 Polaris AI</div>
-                    <div style="background-color: #1e293b; color: #94a3b8; padding: 10px 16px; border-radius: 16px 16px 16px 4px; display: inline-block; max-width: 85%; font-size: 13px; line-height: 1.5; border: 1px solid #334155;">
-                        <i>Thinking...</i>
-                    </div>
-                    <div style="color: #64748b; font-size: 10px; margin-top: 3px; margin-left: 4px;">{time_str}</div>
+                    <div style="color: #58a6ff; font-size: 11px; font-weight: 600; margin-bottom: 3px; margin-left: 2px;">Polaris AI</div>
+                    <table border="0" cellpadding="10" cellspacing="0" style="background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; margin-right: 80px;">
+                        <tr>
+                            <td style="color: #8b949e; font-size: 13px; font-family: 'Segoe UI', sans-serif;">
+                                <i>Thinking...</i>
+                            </td>
+                        </tr>
+                    </table>
+                    <div style="color: #6e7681; font-size: 10px; margin-top: 2px; margin-left: 2px;">{time_str}</div>
                 </td>
             </tr>
         </table>
@@ -428,24 +494,30 @@ class ChatTab(QWidget):
                 pages.add(c.page)
 
             cite_items = [
-                f"📄 <b>{name}</b> (Page {', '.join(str(p) for p in sorted(pages))})"
+                f'<span style="background-color: #21262d; border: 1px solid #30363d; border-radius: 8px; padding: 2px 7px; color: #58a6ff; font-size: 11px; margin-right: 6px;">'
+                f'{name} · p. {", ".join(str(p) for p in sorted(pages))}</span>'
                 for name, pages in unique_sources.items()
             ]
             citations_html = (
-                f'<div style="margin-top: 8px; font-size: 11px; color: #94a3b8; border-top: 1px solid #334155; padding-top: 6px;">'
-                f'<b style="color: #cbd5e1;">Sources Cited:</b><br>{"<br>".join(cite_items)}</div>'
+                f'<div style="margin-top: 8px; font-size: 11px; color: #8b949e; border-top: 1px solid #30363d; padding-top: 6px;">'
+                f'<div style="color: #c9d1d9; font-weight: 600; margin-bottom: 4px;">Sources Cited:</div>'
+                f'{" ".join(cite_items)}</div>'
             )
 
         html = f"""
         <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin: 8px 0;">
             <tr>
                 <td align="left">
-                    <div style="color: #38bdf8; font-size: 11px; font-weight: bold; margin-bottom: 3px; margin-left: 4px;">🤖 Polaris AI</div>
-                    <div style="background-color: #1e293b; color: #f8fafc; padding: 12px 16px; border-radius: 16px 16px 16px 4px; display: inline-block; max-width: 85%; font-size: 13px; line-height: 1.5; border: 1px solid #334155;">
-                        {formatted}
-                        {citations_html}
-                    </div>
-                    <div style="color: #64748b; font-size: 10px; margin-top: 3px; margin-left: 4px;">{now_str}</div>
+                    <div style="color: #58a6ff; font-size: 11px; font-weight: 600; margin-bottom: 3px; margin-left: 2px;">Polaris AI</div>
+                    <table border="0" cellpadding="10" cellspacing="0" style="background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; margin-right: 80px;">
+                        <tr>
+                            <td style="color: #f0f6fc; font-size: 13px; font-family: 'Segoe UI', sans-serif; line-height: 1.45;">
+                                {formatted}
+                                {citations_html}
+                            </td>
+                        </tr>
+                    </table>
+                    <div style="color: #6e7681; font-size: 10px; margin-top: 2px; margin-left: 2px;">{now_str}</div>
                 </td>
             </tr>
         </table>
@@ -466,7 +538,7 @@ class ChatTab(QWidget):
         self.query_edit.setEnabled(True)
         self.query_edit.setFocus()
 
-        # Finalize the assistant bubble with complete citations
+        # Finalize the assistant bubble with citations
         self._update_active_assistant_bubble(self.current_assistant_text, cited=cited, is_final=True)
 
         # Record turn in multi-turn conversation history
@@ -478,13 +550,13 @@ class ChatTab(QWidget):
         self.stop_btn.hide()
         self.send_btn.show()
         self.query_edit.setEnabled(True)
-        self._append_system_msg(f"⚠️ Error: {err}")
+        self._append_system_msg(f"Error: {err}")
         self._scroll_to_bottom()
 
     def _append_system_msg(self, text: str):
         html = f"""
         <div align="center" style="margin: 8px 0;">
-            <span style="background-color: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 12px; border-radius: 12px; border: 1px solid #334155;">
+            <span style="background-color: #161b22; color: #8b949e; font-size: 11px; padding: 4px 12px; border-radius: 12px; border: 1px solid #30363d;">
                 {text}
             </span>
         </div>
@@ -534,7 +606,7 @@ class ChatTab(QWidget):
                 "",
             ]
             for msg in self.history:
-                role = "👤 You" if msg["role"] == "user" else "🤖 Polaris AI"
+                role = "User" if msg["role"] == "user" else "Polaris AI"
                 lines.append(f"### {role}")
                 lines.append(msg["content"])
                 lines.append("")

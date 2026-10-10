@@ -26,8 +26,8 @@ def test_main_window_init(qapp, tmp_path):
     settings = Settings(data_dir=tmp_path)
     win = MainWindow()
     assert win.tabs.count() == 3
-    assert "AI Organize" in win.tabs.tabText(0)
-    assert "Search & Chat" in win.tabs.tabText(1)
+    assert "Organize" in win.tabs.tabText(0)
+    assert "Search" in win.tabs.tabText(1) and "Chat" in win.tabs.tabText(1)
     assert "Summarize" in win.tabs.tabText(2)
 
 

@@ -1,6 +1,6 @@
 """AI-Powered Document Summarizer, Entity Extractor, and Multi-Document Comparator.
 
-Provides an organized, uncluttered UI with a mode switcher for:
+Provides a unified card-based UI with mode switching for:
 1. Document Summary (Single file)
 2. Entity & Action Items Extraction (Single file)
 3. Multi-Document Comparison (2–5 files)
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -36,6 +35,21 @@ from ..ai.summarizer import (
     comparative_summary_stream,
     extract_entities_stream,
     summarize_document_stream,
+)
+from .common.card import CardFrame
+from .common.components import SegmentedControl
+from .common.styles import (
+    ACCENT_PRIMARY,
+    ACCENT_SUCCESS,
+    BG_CARD,
+    BG_INNER,
+    BORDER_SUBTLE,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    danger_button_style,
+    ghost_button_style,
+    primary_button_style,
 )
 
 
@@ -150,7 +164,6 @@ class ComparativeSummaryWorker(QThread):
                 self.failed.emit(str(e))
 
 
-
 class SummarizeTab(QWidget):
     """Clean, unified AI Summarization, Entity Extraction, and Multi-Document tab."""
 
@@ -170,81 +183,92 @@ class SummarizeTab(QWidget):
 
     def _init_ui(self):
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(12, 12, 12, 12)
+        root_layout.setContentsMargins(14, 12, 14, 12)
         root_layout.setSpacing(10)
 
-        # ── 1. ACTION & CONFIGURATION CARD ──────────────────────────────────
-        config_group = QGroupBox("Action & Target Documents")
-        cg_layout = QVBoxLayout(config_group)
-        cg_layout.setContentsMargins(12, 10, 12, 10)
-        cg_layout.setSpacing(8)
+        # ── 1. CONFIGURATION CARD ───────────────────────────────────────────
+        self.config_card = CardFrame(
+            "Document Configuration",
+            subtitle="Select an operation mode and configure document inputs",
+        )
 
         # Mode selector row
         mode_row = QHBoxLayout()
-        mode_label = QLabel("Select Action:")
-        mode_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        mode_row.setSpacing(8)
+        mode_label = QLabel("Action Mode:")
+        mode_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
         mode_row.addWidget(mode_label)
 
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("📝 Single Document Summary", "summary")
-        self.mode_combo.addItem("🔍 Entity & Action Items Extraction", "entity")
-        self.mode_combo.addItem("🔀 Multi-Document Comparison (2–5 Files)", "multidoc")
+        self.mode_combo.addItem("Single Document Summary", "summary")
+        self.mode_combo.addItem("Entity & Action Items Extraction", "entity")
+        self.mode_combo.addItem("Multi-Document Comparison (2–5 Files)", "multidoc")
         self.mode_combo.setStyleSheet(
-            "font-size: 13px; font-weight: 600; padding: 4px 8px; min-width: 280px;"
+            "font-size: 12px; font-weight: 500; min-width: 260px;"
         )
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self.mode_combo)
         mode_row.addStretch()
-        cg_layout.addLayout(mode_row)
+        self.config_card.content_layout.addLayout(mode_row)
 
         # ── Dynamic Input Stack (Single vs Multi) ───────────────────────────
         self.input_stack = QStackedWidget()
 
-        # PAGE 0: Single Document Setup (for Summary and Entity Extraction)
+        # PAGE 0: Single Document Setup
         page_single = QWidget()
         ps_layout = QVBoxLayout(page_single)
         ps_layout.setContentsMargins(0, 0, 0, 0)
         ps_layout.setSpacing(8)
 
         single_file_row = QHBoxLayout()
+        single_file_row.setSpacing(8)
         self.file_edit = QLineEdit()
         self.file_edit.setPlaceholderText("Select a PDF, Word document, Markdown, or text file...")
-        self.browse_btn = QPushButton("Browse File...")
+        self.browse_btn = QPushButton("Browse...")
         self.browse_btn.clicked.connect(self._browse_single_file)
         single_file_row.addWidget(self.file_edit, 1)
         single_file_row.addWidget(self.browse_btn)
         ps_layout.addLayout(single_file_row)
 
-        # Single doc options (Style & Depth - visible in Summary mode, hidden in Entity mode)
+        # Single doc options (Style & Depth)
         self.single_opts_widget = QWidget()
         so_layout = QHBoxLayout(self.single_opts_widget)
         so_layout.setContentsMargins(0, 0, 0, 0)
         so_layout.setSpacing(8)
 
-        so_layout.addWidget(QLabel("Summary Style:"))
+        style_lbl = QLabel("Style:")
+        style_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        so_layout.addWidget(style_lbl)
+
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("Key Takeaways & Action Items (Bullets)", "key_points")
         self.preset_combo.addItem("Executive Summary (1-2 paragraphs)", "executive")
         self.preset_combo.addItem("Detailed Notes (Structured breakdown)", "detailed")
         so_layout.addWidget(self.preset_combo)
 
-        so_layout.addSpacing(12)
-        so_layout.addWidget(QLabel("Depth:"))
-        so_layout.addWidget(QLabel("Brief"))
+        so_layout.addSpacing(6)
+        depth_lbl = QLabel("Depth:")
+        depth_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        so_layout.addWidget(depth_lbl)
 
+        # Compact Segmented Control
+        self.segmented_depth = SegmentedControl(["Brief", "Moderate", "Comprehensive"], default=1)
+        self.segmented_depth.selection_changed.connect(self._on_segmented_depth_changed)
+        so_layout.addWidget(self.segmented_depth)
+
+        # Hidden slider to preserve complete API compatibility with existing tests
         self.length_slider = QSlider(Qt.Orientation.Horizontal)
         self.length_slider.setRange(0, 2)
-        self.length_slider.setValue(1)  # Moderate default
-        self.length_slider.setFixedWidth(100)
-        self.length_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.length_slider.setTickInterval(1)
+        self.length_slider.setValue(1)
+        self.length_slider.hide()
         self.length_slider.valueChanged.connect(self._on_single_length_changed)
         so_layout.addWidget(self.length_slider)
 
-        so_layout.addWidget(QLabel("Comprehensive"))
         self.length_label = QLabel(LENGTH_LABELS[1])
-        self.length_label.setStyleSheet("color: #2563eb; font-weight: bold; min-width: 90px;")
+        self.length_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.length_label.hide()
         so_layout.addWidget(self.length_label)
+
         so_layout.addStretch()
         ps_layout.addWidget(self.single_opts_widget)
 
@@ -257,17 +281,22 @@ class SummarizeTab(QWidget):
         pm_layout.setSpacing(8)
 
         multi_files_row = QHBoxLayout()
+        multi_files_row.setSpacing(8)
         self.compare_file_list = QListWidget()
-        self.compare_file_list.setFixedHeight(82)
+        self.compare_file_list.setFixedHeight(80)
         self.compare_file_list.setToolTip("Documents to compare (2 to 5 files).")
         multi_files_row.addWidget(self.compare_file_list, 1)
 
         multi_btn_col = QVBoxLayout()
-        self.add_files_btn = QPushButton("➕ Add Files...")
+        multi_btn_col.setSpacing(4)
+        self.add_files_btn = QPushButton("Add Files...")
+        self.add_files_btn.setStyleSheet(ghost_button_style())
         self.add_files_btn.clicked.connect(self._add_compare_files)
-        self.remove_file_btn = QPushButton("➖ Remove Selected")
+        self.remove_file_btn = QPushButton("Remove Selected")
+        self.remove_file_btn.setStyleSheet(ghost_button_style())
         self.remove_file_btn.clicked.connect(self._remove_compare_file)
-        self.clear_files_btn = QPushButton("🗑️ Clear List")
+        self.clear_files_btn = QPushButton("Clear List")
+        self.clear_files_btn.setStyleSheet(ghost_button_style())
         self.clear_files_btn.clicked.connect(self._clear_compare_files)
         multi_btn_col.addWidget(self.add_files_btn)
         multi_btn_col.addWidget(self.remove_file_btn)
@@ -278,114 +307,146 @@ class SummarizeTab(QWidget):
 
         # Multi options (Style & Depth)
         multi_opts_row = QHBoxLayout()
-        multi_opts_row.addWidget(QLabel("Comparison Style:"))
+        multi_opts_row.setSpacing(8)
+        cmp_style_lbl = QLabel("Comparison Style:")
+        cmp_style_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        multi_opts_row.addWidget(cmp_style_lbl)
+
         self.multi_preset_combo = QComboBox()
         self.multi_preset_combo.addItem("Key Takeaways & Comparison (Bullets)", "key_points")
         self.multi_preset_combo.addItem("Executive Comparative Summary", "executive")
         self.multi_preset_combo.addItem("Detailed Cross-Document Breakdown", "detailed")
         multi_opts_row.addWidget(self.multi_preset_combo)
 
-        multi_opts_row.addSpacing(12)
-        multi_opts_row.addWidget(QLabel("Depth:"))
-        multi_opts_row.addWidget(QLabel("Brief"))
+        multi_opts_row.addSpacing(6)
+        cmp_depth_lbl = QLabel("Depth:")
+        cmp_depth_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; font-weight: 500;")
+        multi_opts_row.addWidget(cmp_depth_lbl)
+
+        self.multi_segmented_depth = SegmentedControl(["Brief", "Moderate", "Comprehensive"], default=1)
+        self.multi_segmented_depth.selection_changed.connect(self._on_multi_segmented_depth_changed)
+        multi_opts_row.addWidget(self.multi_segmented_depth)
 
         self.multi_length_slider = QSlider(Qt.Orientation.Horizontal)
         self.multi_length_slider.setRange(0, 2)
         self.multi_length_slider.setValue(1)
-        self.multi_length_slider.setFixedWidth(100)
-        self.multi_length_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.multi_length_slider.setTickInterval(1)
+        self.multi_length_slider.hide()
         self.multi_length_slider.valueChanged.connect(self._on_multi_length_changed)
         multi_opts_row.addWidget(self.multi_length_slider)
 
-        multi_opts_row.addWidget(QLabel("Comprehensive"))
         self.multi_length_label = QLabel(LENGTH_LABELS[1])
-        self.multi_length_label.setStyleSheet("color: #0f766e; font-weight: bold; min-width: 90px;")
+        self.multi_length_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.multi_length_label.hide()
         multi_opts_row.addWidget(self.multi_length_label)
+
         multi_opts_row.addStretch()
         pm_layout.addLayout(multi_opts_row)
 
         self.input_stack.addWidget(page_multi)
-        cg_layout.addWidget(self.input_stack)
+        self.config_card.content_layout.addWidget(self.input_stack)
 
         # ── Primary Action Button & Status ──────────────────────────────────
         action_row = QHBoxLayout()
-        self.run_btn = QPushButton("✨ Summarize with Local AI")
-        self.run_btn.setStyleSheet(
-            "font-weight: bold; font-size: 13px; background-color: #2563eb; color: white; padding: 7px 18px; border-radius: 4px;"
-        )
+        action_row.setSpacing(8)
+        self.run_btn = QPushButton("Summarize with Local AI")
+        self.run_btn.setStyleSheet(primary_button_style())
         self.run_btn.clicked.connect(self._on_run_clicked)
         action_row.addWidget(self.run_btn)
 
-        self.stop_btn = QPushButton("⏹ Stop")
-        self.stop_btn.setStyleSheet(
-            "font-weight: bold; font-size: 13px; background-color: #dc2626; color: white; padding: 7px 14px; border-radius: 4px;"
-        )
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setStyleSheet(danger_button_style())
         self.stop_btn.hide()
         self.stop_btn.clicked.connect(self._stop_current_operation)
         action_row.addWidget(self.stop_btn)
 
         self.status_label = QLabel("Ready. Select a document and click 'Summarize with Local AI'.")
-        self.status_label.setStyleSheet("color: #64748b; font-size: 12px; margin-left: 6px;")
+        self.status_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         action_row.addWidget(self.status_label, 1)
-        cg_layout.addLayout(action_row)
+        self.config_card.content_layout.addLayout(action_row)
 
-        # Thin progress bar
+        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
-        self.progress_bar.setFixedHeight(5)
+        self.progress_bar.setFixedHeight(4)
         self.progress_bar.hide()
-        cg_layout.addWidget(self.progress_bar)
+        self.config_card.content_layout.addWidget(self.progress_bar)
 
-        root_layout.addWidget(config_group)
+        root_layout.addWidget(self.config_card)
 
         # ── 2. UNIFIED RESULTS & INSIGHTS CARD ──────────────────────────────
-        results_group = QGroupBox("AI Results & Insights")
-        rg_layout = QVBoxLayout(results_group)
-        rg_layout.setContentsMargins(12, 10, 12, 10)
-        rg_layout.setSpacing(8)
+        results_header_actions = QWidget()
+        rha_layout = QHBoxLayout(results_header_actions)
+        rha_layout.setContentsMargins(0, 0, 0, 0)
+        rha_layout.setSpacing(6)
 
-        # Unified viewer (supports both Markdown text and styled HTML cards)
+        self.copy_btn = QPushButton("Copy Output")
+        self.copy_btn.setStyleSheet(ghost_button_style())
+        self.copy_btn.clicked.connect(self.copy_summary)
+        rha_layout.addWidget(self.copy_btn)
+
+        self.save_btn = QPushButton("Save As...")
+        self.save_btn.setStyleSheet(ghost_button_style())
+        self.save_btn.setToolTip("Save output as a Markdown (.md) or Text (.txt) file")
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self.save_to_file)
+        rha_layout.addWidget(self.save_btn)
+
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setStyleSheet(ghost_button_style())
+        self.clear_btn.clicked.connect(self.clear_summary)
+        rha_layout.addWidget(self.clear_btn)
+
+        self.results_card = CardFrame(
+            "Summary Output & Insights",
+            subtitle="Synthesized takeaways streamed directly from local Ollama",
+            header_action=results_header_actions,
+        )
+
+        # Unified viewer
         self.summary_viewer = QTextBrowser()
         self.summary_viewer.setStyleSheet(
-            "background-color: #0f172a; color: #f8fafc; font-family: Segoe UI, sans-serif; "
-            "font-size: 13px; padding: 12px; line-height: 1.5; border-radius: 4px;"
+            f"background-color: {BG_INNER}; color: {TEXT_PRIMARY}; font-family: 'Segoe UI', system-ui, sans-serif; "
+            f"font-size: 13px; padding: 14px; line-height: 1.5; border: 1px solid {BORDER_SUBTLE}; border-radius: 6px;"
         )
         # Aliases for backward compatibility
         self.result_viewer = self.summary_viewer
         self.entity_viewer = self.summary_viewer
-        rg_layout.addWidget(self.summary_viewer, 1)
+        self.results_card.content_layout.addWidget(self.summary_viewer, 1)
 
-        # Bottom toolbar
+        # Bottom stats row
         bottom_row = QHBoxLayout()
-        self.copy_btn = QPushButton("📋 Copy to Clipboard")
-        self.copy_btn.clicked.connect(self.copy_summary)
-
-        self.save_btn = QPushButton("💾 Save to File")
-        self.save_btn.setToolTip("Save output as a Markdown (.md) or Text (.txt) file")
-        self.save_btn.setEnabled(False)
-        self.save_btn.clicked.connect(self.save_to_file)
-
-        self.clear_btn = QPushButton("Clear")
-        self.clear_btn.clicked.connect(self.clear_summary)
-
-        bottom_row.addWidget(self.copy_btn)
-        bottom_row.addWidget(self.save_btn)
-        bottom_row.addWidget(self.clear_btn)
-
+        bottom_row.setContentsMargins(0, 0, 0, 0)
         self.stats_label = QLabel("")
-        self.stats_label.setStyleSheet("color: #64748b; font-size: 12px;")
-        bottom_row.addSpacing(16)
+        self.stats_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         bottom_row.addWidget(self.stats_label)
         bottom_row.addStretch()
+        self.results_card.content_layout.addLayout(bottom_row)
 
-        rg_layout.addLayout(bottom_row)
-        root_layout.addWidget(results_group, 1)
+        root_layout.addWidget(self.results_card, 1)
 
-        # Compatibility aliases for existing test suite or helper references
+        # Compatibility aliases
         self.summarize_btn = self.run_btn
         self.compare_btn = self.run_btn
         self.extract_btn = self.run_btn
+
+        self._show_empty_state()
+
+    def _show_empty_state(self):
+        html = f"""
+        <div align="center" style="margin: 36px 0;">
+            <table cellpadding="18" cellspacing="0" style="background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; max-width: 580px;">
+                <tr>
+                    <td align="center">
+                        <div style="font-size: 14px; font-weight: 600; color: #58a6ff; margin-bottom: 6px;">Document Summary & Analysis</div>
+                        <div style="font-size: 12px; color: #8b949e; line-height: 1.5;">
+                            Select a document above and click <b>Summarize with Local AI</b> to generate executive briefs, bulleted takeaways, or structured action items.
+                        </div>
+                    </td>
+                </tr>
+            </table>
+        </div>
+        """
+        self.summary_viewer.setHtml(html)
 
     # ── Mode Switching ──────────────────────────────────────────────────────
 
@@ -396,36 +457,46 @@ class SummarizeTab(QWidget):
         if mode == "summary":
             self.input_stack.setCurrentIndex(0)
             self.single_opts_widget.show()
-            self.run_btn.setText("✨ Summarize with Local AI")
-            self.run_btn.setStyleSheet(
-                "font-weight: bold; font-size: 13px; background-color: #2563eb; color: white; padding: 7px 18px; border-radius: 4px;"
-            )
+            self.run_btn.setText("Summarize with Local AI")
+            self.run_btn.setStyleSheet(primary_button_style())
             self.status_label.setText("Select a document and click 'Summarize with Local AI'.")
 
         elif mode == "entity":
             self.input_stack.setCurrentIndex(0)
-            self.single_opts_widget.hide()  # entity mode doesn't need summary style/length
-            self.run_btn.setText("🔍 Extract Entities & Figures")
+            self.single_opts_widget.hide()
+            self.run_btn.setText("Extract Entities & Figures")
             self.run_btn.setStyleSheet(
-                "font-weight: bold; font-size: 13px; background-color: #7c3aed; color: white; padding: 7px 18px; border-radius: 4px;"
+                "font-weight: 600; font-size: 12px; background-color: #6366f1; color: white; "
+                "padding: 7px 16px; border-radius: 6px; border: 1px solid #4f46e5;"
             )
             self.status_label.setText("Select a document and click 'Extract Entities & Figures'.")
 
         elif mode == "multidoc":
             self.input_stack.setCurrentIndex(1)
-            self.run_btn.setText("🔀 Compare Documents with Local AI")
+            self.run_btn.setText("Compare Documents with Local AI")
             self.run_btn.setStyleSheet(
-                "font-weight: bold; font-size: 13px; background-color: #0f766e; color: white; padding: 7px 18px; border-radius: 4px;"
+                "font-weight: 600; font-size: 12px; background-color: #0f766e; color: white; "
+                "padding: 7px 16px; border-radius: 6px; border: 1px solid #115e59;"
             )
             n = self.compare_file_list.count()
             self.status_label.setText(
                 f"{n} document(s) loaded. Add 2–5 documents and click 'Compare Documents'."
             )
 
+    def _on_segmented_depth_changed(self, idx: int):
+        self.length_slider.setValue(idx)
+        self.length_label.setText(LENGTH_LABELS.get(idx, "Moderate"))
+
+    def _on_multi_segmented_depth_changed(self, idx: int):
+        self.multi_length_slider.setValue(idx)
+        self.multi_length_label.setText(LENGTH_LABELS.get(idx, "Moderate"))
+
     def _on_single_length_changed(self, value: int):
+        self.segmented_depth.set_selected(value)
         self.length_label.setText(LENGTH_LABELS.get(value, "Moderate"))
 
     def _on_multi_length_changed(self, value: int):
+        self.multi_segmented_depth.set_selected(value)
         self.multi_length_label.setText(LENGTH_LABELS.get(value, "Moderate"))
 
     # ── File Selection Handlers ─────────────────────────────────────────────
@@ -537,7 +608,7 @@ class SummarizeTab(QWidget):
 
     def _on_summary_done(self):
         self._set_running_state(False)
-        self.status_label.setText("✓ Summary complete!")
+        self.status_label.setText("Summary complete!")
         if self.accumulated_text:
             self.summary_viewer.setMarkdown(self.accumulated_text)
             self.save_btn.setEnabled(True)
@@ -550,7 +621,6 @@ class SummarizeTab(QWidget):
         file_path = self.file_edit.text().strip()
         if not self._validate_file_path(file_path):
             return
-
 
         self._set_running_state(True)
         self.summary_viewer.clear()
@@ -571,39 +641,33 @@ class SummarizeTab(QWidget):
         self._set_running_state(False)
         self._last_json_text = json_text
 
-        # ── Robust Multi-Tier JSON Parsing ──────────────────────────────────
+        # Robust multi-tier JSON parsing
         data: dict | None = None
         cleaned = json_text.strip()
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
             cleaned = re.sub(r"\s*```$", "", cleaned)
 
-        # 1. Direct parse
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
             pass
 
-        # 2. Substring object extraction
         if data is None:
             match = re.search(r"\{.*\}", cleaned, re.DOTALL)
             if match:
                 try:
                     data = json.loads(match.group())
                 except json.JSONDecodeError:
-                    # Clean trailing commas
                     repaired = re.sub(r",\s*([\]}])", r"\1", match.group())
                     try:
                         data = json.loads(repaired)
                     except json.JSONDecodeError:
                         pass
 
-        # 3. Handle unclosed JSON string / bracket cutoff recovery
         if data is None and "{" in cleaned:
-            # Auto-close brackets if model was truncated
             repaired = cleaned[cleaned.find("{") :]
             repaired = re.sub(r",\s*$", "", repaired.strip())
-            # Close open quotes and arrays
             if repaired.count('"') % 2 != 0:
                 repaired += '"'
             open_brackets = repaired.count("[") - repaired.count("]")
@@ -624,16 +688,16 @@ class SummarizeTab(QWidget):
             self.save_btn.setEnabled(True)
             return
 
-        # ── Render Structured Cards HTML ────────────────────────────────────
+        # Render Structured Cards HTML
         sections = [
-            ("✅ Action Items & To-Dos",   "action_items",      "#4ade80", "#14532d"),
-            ("📅 Deadlines & Schedules",    "deadlines",         "#fbbf24", "#78350f"),
-            ("💰 Financial Figures",       "financial_figures", "#60a5fa", "#1e3a8a"),
-            ("🏷️ Key Entities & Names",     "key_entities",      "#c084fc", "#581c87"),
+            ("Action Items & To-Dos",   "action_items",      "#3fb950", "#143a22"),
+            ("Deadlines & Schedules",    "deadlines",         "#d29922", "#3b2a0c"),
+            ("Financial Figures",       "financial_figures", "#58a6ff", "#132b4a"),
+            ("Key Entities & Names",     "key_entities",      "#bc8cff", "#2b1b47"),
         ]
 
         html_parts: list[str] = [
-            '<div style="font-family: Segoe UI, sans-serif; padding: 4px;">'
+            '<div style="font-family: \'Segoe UI\', sans-serif; padding: 4px;">'
         ]
         total_items = 0
         md_export_lines: list[str] = [f"# Extracted Entities & Action Items\n"]
@@ -646,17 +710,17 @@ class SummarizeTab(QWidget):
             item_count = len(items)
             total_items += item_count
 
-            badge = f'<span style="background-color: {bg_tint}; color: {accent_color}; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; margin-left: 8px;">{item_count}</span>'
+            badge = f'<span style="background-color: {bg_tint}; color: {accent_color}; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 8px;">{item_count}</span>'
             html_parts.append(
                 f'<div style="margin-bottom: 14px; border-left: 3px solid {accent_color}; padding-left: 10px;">'
-                f'<h3 style="color: {accent_color}; margin: 0 0 6px 0; font-size: 14px;">{title} {badge}</h3>'
+                f'<h3 style="color: {accent_color}; margin: 0 0 6px 0; font-size: 13px; font-weight: 600;">{title} {badge}</h3>'
             )
 
             md_export_lines.append(f"## {title} ({item_count})\n")
 
             if items:
                 items_html = "".join(
-                    f'<li style="margin-bottom: 4px; color: #f1f5f9;">{str(item)}</li>'
+                    f'<li style="margin-bottom: 4px; color: #f0f6fc;">{str(item)}</li>'
                     for item in items
                 )
                 html_parts.append(
@@ -666,7 +730,7 @@ class SummarizeTab(QWidget):
                     md_export_lines.append(f"- {item}")
             else:
                 html_parts.append(
-                    '<p style="margin: 0; color: #94a3b8; font-style: italic; font-size: 12px;">No items detected in this category.</p>'
+                    '<p style="margin: 0; color: #8b949e; font-style: italic; font-size: 12px;">No items detected in this category.</p>'
                 )
                 md_export_lines.append("_None detected._")
 
@@ -678,7 +742,7 @@ class SummarizeTab(QWidget):
         self.summary_viewer.setHtml("".join(html_parts))
         self.accumulated_text = "\n".join(md_export_lines)
         self.save_btn.setEnabled(True)
-        self.status_label.setText(f"✓ Extraction complete — {total_items} item(s) found.")
+        self.status_label.setText(f"Extraction complete — {total_items} item(s) found.")
         self.stats_label.setText(f"Found {total_items} structured items across 4 categories")
 
     # ── Multi-Document Comparative Summary ─────────────────────────────────
@@ -733,7 +797,7 @@ class SummarizeTab(QWidget):
 
     def _on_comparison_done(self):
         self._set_running_state(False)
-        self.status_label.setText("✓ Multi-document comparative analysis complete!")
+        self.status_label.setText("Multi-document comparative analysis complete!")
         if self.accumulated_text:
             self.summary_viewer.setMarkdown(self.accumulated_text)
             self.save_btn.setEnabled(True)
@@ -782,7 +846,7 @@ class SummarizeTab(QWidget):
         if self.compare_worker and self.compare_worker.isRunning():
             self.compare_worker.stop()
         self._set_running_state(False)
-        self.status_label.setText("⏹ Operation cancelled by user.")
+        self.status_label.setText("Operation cancelled by user.")
 
     def _on_op_failed(self, err: str):
         self._set_running_state(False)
@@ -793,7 +857,7 @@ class SummarizeTab(QWidget):
         text = self.summary_viewer.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
-            self.status_label.setText("✓ Output copied to clipboard!")
+            self.status_label.setText("Output copied to clipboard!")
 
     def save_to_file(self):
         if not self.accumulated_text:
@@ -829,7 +893,7 @@ class SummarizeTab(QWidget):
                 out_p.write_text(self._last_json_text, encoding="utf-8")
             else:
                 out_p.write_text(self.accumulated_text, encoding="utf-8")
-            self.status_label.setText(f"✓ Saved to {out_p.name}")
+            self.status_label.setText(f"Saved to {out_p.name}")
         except OSError as exc:
             QMessageBox.critical(self, "Save Failed", f"Could not write file:\n{exc}")
 
@@ -839,5 +903,5 @@ class SummarizeTab(QWidget):
         self._last_json_text = ""
         self.save_btn.setEnabled(False)
         self.stats_label.setText("")
+        self._show_empty_state()
         self.status_label.setText("Output cleared.")
-
