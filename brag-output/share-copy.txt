@@ -1,3 +1,0 @@
-Polaris is a 100% offline desktop AI workspace that organizes cluttered download folders, indexes files with hybrid BM25 + FAISS vector search, and chats with your documents using on-device Ollama LLMs. Every retrieved answer includes verifiable citation badges that deep-link directly to line numbers in your code editor, complete with a real-time download watcher and safe one-click undo. Zero cloud API keys, zero telemetry, and zero subscription fees.
-
-https://github.com/isnotfred/opensrc-polaris
